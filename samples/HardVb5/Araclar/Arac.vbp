@@ -1,0 +1,5 @@
+Type=Exe
+Form=..\Formlar\frmHedef.frm
+Module=modZor; ..\Moduller\modZor.bas
+Startup="frmHedef"
+Name="Arac"

@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace VbScreenCleaner.Core;
 
@@ -57,7 +58,9 @@ public static class CleanupWriter
         foreach (var node in fr.RemovalRoots)
             for (int i = node.BeginLine; i <= node.EndLine; i++) delete[i] = true;
 
-        foreach (var proc in fr.RemovedProcs.Where(p => p.EndLine >= 0))
+        RewriteTabLists(fr, lines, delete, replace);
+
+        foreach (var proc in fr.RemovedProcs.Concat(fr.DeadCodeProcs).Where(p => p.EndLine >= 0))
         {
             for (int i = proc.HeaderLine; i <= proc.EndLine; i++) delete[i] = true;
             // Avoid leaving two blank lines where the procedure was.
@@ -72,9 +75,9 @@ public static class CleanupWriter
             var live = line.Units.Where(u => !deadUnits.Contains(u)).ToList();
             string? text;
             if (live.Count == 0)
-                text = line.Label != null ? line.Indent + line.Label + ":" + Suffix(line.Comment) : null;
+                text = line.Label != null ? line.Indent + line.Label + Suffix(line.Comment) : null;
             else
-                text = line.Indent + (line.Label != null ? line.Label + ": " : "")
+                text = line.Indent + (line.Label != null ? line.Label + " " : "")
                        + string.Join(": ", live.Select(u => u.Text)) + Suffix(line.Comment);
 
             if (text == null)
@@ -99,6 +102,48 @@ public static class CleanupWriter
         static string Suffix(string comment) => comment.Length > 0 ? " " + comment : "";
         static bool IsBlank(string s) => s.Trim().Length == 0;
     }
+
+    static readonly Regex TabEntryRx = new(@"^Tab\((\d+)\)\.Control\((\d+)\)(\..*)?$");
+    static readonly Regex CountValueRx = new(@"(=\s*)\d+");
+
+    /// <summary>
+    /// SSTab lists the controls on each tab as Tab(n).Control(k)= "name" plus Tab(n).ControlCount.
+    /// Drops the entries of removed controls, renumbers the rest and fixes the count.
+    /// </summary>
+    static void RewriteTabLists(FileResult fr, List<string> lines, bool[] delete, Dictionary<int, (int Last, string Text)> replace)
+    {
+        foreach (var owner in fr.TabListRemovals.GroupBy(t => t.Owner))
+        {
+            var removedKeys = owner.Select(t => TabEntryRx.Match(t.Property))
+                .Select(m => (Tab: m.Groups[1].Value, K: int.Parse(m.Groups[2].Value))).ToHashSet();
+            var node = owner.Key;
+            var entries = node.PropertyLines
+                .Select(p => (Match: TabEntryRx.Match(p.Key), Line: p.Value))
+                .Where(e => e.Match.Success)
+                .Select(e => (Tab: e.Match.Groups[1].Value, K: int.Parse(e.Match.Groups[2].Value), e.Line))
+                .ToList();
+
+            foreach (var tab in removedKeys.Select(r => r.Tab).Distinct())
+            {
+                var kept = entries.Where(e => e.Tab == tab && !removedKeys.Contains((tab, e.K)))
+                    .Select(e => e.K).Distinct().Order().ToList();
+                foreach (var e in entries.Where(e => e.Tab == tab))
+                {
+                    if (removedKeys.Contains((tab, e.K))) { delete[e.Line] = true; continue; }
+                    int newK = kept.IndexOf(e.K);
+                    if (newK != e.K)
+                    {
+                        var old = $"Tab({tab}).Control({e.K})";
+                        var line = lines[e.Line];
+                        int at = line.IndexOf(old, StringComparison.Ordinal);
+                        replace[e.Line] = (e.Line, line[..at] + $"Tab({tab}).Control({newK})" + line[(at + old.Length)..]);
+                    }
+                }
+                if (node.PropertyLines.TryGetValue($"Tab({tab}).ControlCount", out var countLine))
+                    replace[countLine] = (countLine, CountValueRx.Replace(lines[countLine], "${1}" + kept.Count, 1));
+            }
+        }
+    }
 }
 
 public static class CleanupReport
@@ -111,9 +156,11 @@ public static class CleanupReport
         sb.AppendLine($"Tarih: {DateTime.Now:yyyy-MM-dd HH:mm}");
         sb.AppendLine($"Form_Load içinde gizlenenler dahil: {(r.Options.IncludeHiddenInFormLoad ? "Evet" : "Hayır")}");
         sb.AppendLine($"Controls koleksiyonu kullanan formlar atlandı: {(r.Options.SkipFormsUsingControlsCollection ? "Evet" : "Hayır")}");
+        sb.AppendLine($"Kullanılmayan prosedürler ölü kod sayıldı: {(r.Options.RemoveDeadCode ? "Evet" : "Hayır")}");
         sb.AppendLine();
         sb.AppendLine($"Silinen kontrol sayısı: {r.TotalRemovedControls}");
         sb.AppendLine($"Silinen olay prosedürü: {r.Files.Sum(f => f.RemovedProcs.Count)}");
+        sb.AppendLine($"Silinen kullanılmayan prosedür: {r.Files.Sum(f => f.DeadCodeProcs.Count)}");
         sb.AppendLine($"Silinen kod satırı/ifadesi: {r.Files.Sum(f => f.RemovedUnits.Count)}");
         sb.AppendLine($"Değişen dosya: {r.Files.Count(f => f.HasChanges)}");
         sb.AppendLine();
@@ -145,6 +192,16 @@ public static class CleanupReport
             {
                 sb.AppendLine("  SİLİNEN OLAY PROSEDÜRLERİ:");
                 foreach (var p in fr.RemovedProcs) sb.AppendLine($"    - {p.Name} (satır {p.HeaderLine + 1})");
+            }
+            if (fr.DeadCodeProcs.Count > 0)
+            {
+                sb.AppendLine("  SİLİNEN KULLANILMAYAN PROSEDÜRLER (hiçbir yerden çağrılmıyor, silinen kontrolleri kullanıyordu):");
+                foreach (var p in fr.DeadCodeProcs) sb.AppendLine($"    - {p.Name} (satır {p.HeaderLine + 1})");
+            }
+            if (fr.TabListRemovals.Count > 0)
+            {
+                sb.AppendLine("  GÜNCELLENEN SEKME LİSTELERİ:");
+                foreach (var (owner, prop) in fr.TabListRemovals) sb.AppendLine($"    - {owner.DisplayName}.{prop} kaldırıldı, sıra numaraları güncellendi");
             }
             if (fr.RemovedUnits.Count > 0)
             {

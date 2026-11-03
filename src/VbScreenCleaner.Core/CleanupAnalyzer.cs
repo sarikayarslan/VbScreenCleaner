@@ -8,6 +8,12 @@ public sealed class CleanupOptions
     /// <summary>Leave forms alone whose code touches the Controls collection (dynamic access by name/loop).</summary>
     public bool SkipFormsUsingControlsCollection { get; set; } = true;
 
+    /// <summary>
+    /// Treat procedures nothing calls as dead: their code does not keep controls alive, and they are
+    /// deleted when they use a deleted control (or call a deleted procedure).
+    /// </summary>
+    public bool RemoveDeadCode { get; set; } = true;
+
     /// <summary>Group keys (<see cref="ControlGroup.Key"/>) the user chose to keep.</summary>
     public HashSet<string> ForcedKeep { get; } = new(StringComparer.OrdinalIgnoreCase);
 }
@@ -17,12 +23,17 @@ public sealed class FileResult
     public required VbSourceFile File { get; init; }
     public List<ControlNode> RemovalRoots { get; } = new();
     public List<ControlNode> KeptHidden { get; } = new();
+    /// <summary>Event procedures of removed controls.</summary>
     public List<ProcInfo> RemovedProcs { get; } = new();
+    /// <summary>Procedures nothing calls that had to go because they used removed controls.</summary>
+    public List<ProcInfo> DeadCodeProcs { get; } = new();
     public List<CodeUnit> RemovedUnits { get; } = new();
+    /// <summary>SSTab-style list entries (owner, property name such as "Tab(0).Control(1)") to drop.</summary>
+    public List<(ControlNode Owner, string Property)> TabListRemovals { get; } = new();
     public List<string> Notes { get; } = new();
 
     public int RemovedControlCount => RemovalRoots.Sum(r => r.SelfAndDescendants().Count());
-    public bool HasChanges => RemovalRoots.Count > 0 || RemovedProcs.Count > 0 || RemovedUnits.Count > 0;
+    public bool HasChanges => RemovalRoots.Count > 0 || RemovedProcs.Count > 0 || DeadCodeProcs.Count > 0 || RemovedUnits.Count > 0;
 }
 
 public sealed class AnalysisResult
@@ -48,12 +59,33 @@ public sealed class CleanupAnalyzer
     static readonly HashSet<string> LoadProcs = new(StringComparer.OrdinalIgnoreCase) { "Form_Load", "Form_Initialize", "MDIForm_Load", "MDIForm_Initialize", "UserControl_Initialize" };
     static readonly HashSet<string> NonReferenceProps = new(StringComparer.OrdinalIgnoreCase) { "Caption", "Text", "ToolTipText", "Tag", "Name", "DataField", "Index" };
 
+    /// <summary>Events that need the user to interact with the control; a hidden control never gets them.</summary>
+    static readonly HashSet<string> InteractiveEvents = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Click", "DblClick", "MouseDown", "MouseUp", "MouseMove", "KeyDown", "KeyUp", "KeyPress",
+        "GotFocus", "LostFocus", "Validate", "Change", "Scroll", "ItemCheck", "DropDown",
+        "DragDrop", "DragOver", "OLEDragDrop", "OLEDragOver", "OLEStartDrag", "OLEGiveFeedback", "OLESetData", "OLECompleteDrag",
+        "ColumnClick", "ItemClick", "NodeClick", "ButtonClick", "ButtonMenuClick", "Expand", "Collapse",
+        "BeforeLabelEdit", "AfterLabelEdit",
+    };
+
     readonly VbProject _project;
     readonly CleanupOptions _options;
     readonly Dictionary<string, List<VbSourceFile>> _formsByName = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, List<ControlGroup>> _groupsByName = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, List<ControlGroup>> _handlerOwners = new(StringComparer.OrdinalIgnoreCase);
     readonly List<(ControlNode From, string Prop, ControlGroup To)> _designRefs = new();
+    /// <summary>Functions and Property Gets defined in the project: calling them may have side effects.</summary>
+    readonly HashSet<string> _userFunctions = new(StringComparer.OrdinalIgnoreCase);
+    HashSet<VbSourceFile> _formsUsingControls = new();
+
+    // Call graph: procedures by name, and the names each procedure (or module-level code) mentions.
+    readonly Dictionary<string, List<ProcInfo>> _procsByName = new(StringComparer.OrdinalIgnoreCase);
+    readonly Dictionary<ProcInfo, List<string>> _procRefs = new();
+    readonly List<(VbSourceFile File, string Name)> _moduleLevelRefs = new();
+    /// <summary>SSTab entries "Tab(n).Control(k)" pointing at a control; rewritten instead of blocking.</summary>
+    readonly List<(ControlNode Owner, string Prop, ControlGroup To)> _tabRefs = new();
+    static readonly System.Text.RegularExpressions.Regex TabControlRx = new(@"^Tab\(\d+\)\.Control\(\d+\)$");
 
     CleanupAnalyzer(VbProject project, CleanupOptions options)
     {
@@ -84,13 +116,36 @@ public sealed class CleanupAnalyzer
             foreach (var g in allGroups) g.Removed = removed.Contains(g);
         }
 
-        Verify(removed, result);
-        BuildResults(result, removed);
+        var deleted = ProcsToDelete(removed, DeadProcs(removed));
+        Verify(removed, deleted, result);
+        BuildResults(result, removed, deleted);
         return result;
     }
 
     void BuildIndexes()
     {
+        foreach (var proc in _project.Files.SelectMany(f => f.Procs))
+        {
+            if (proc.Kind.Equals("Function", StringComparison.OrdinalIgnoreCase) || proc.Kind.Equals("Property Get", StringComparison.OrdinalIgnoreCase))
+                _userFunctions.Add(proc.Name);
+            if (!_procsByName.TryGetValue(proc.Name, out var list)) _procsByName[proc.Name] = list = new List<ProcInfo>();
+            list.Add(proc);
+        }
+
+        // Every identifier or string that names a procedure is a potential call (CallByName, AddressOf, frmX.Proc ...).
+        foreach (var f in _project.Files)
+            foreach (var u in f.Units)
+                foreach (var t in u.Line.Tokens.Skip(u.TokStart).Take(u.TokEnd - u.TokStart))
+                {
+                    if (t.Kind is not (TokKind.Ident or TokKind.String) || !_procsByName.ContainsKey(t.Text)) continue;
+                    if (u.Proc == null) _moduleLevelRefs.Add((f, t.Text));
+                    else
+                    {
+                        if (!_procRefs.TryGetValue(u.Proc, out var refs)) _procRefs[u.Proc] = refs = new List<string>();
+                        refs.Add(t.Text);
+                    }
+                }
+
         foreach (var f in _project.Files.Where(f => f.HasDesigner))
         {
             Add(_formsByName, f.ObjectName, f);
@@ -100,12 +155,13 @@ public sealed class CleanupAnalyzer
                 foreach (var h in g.Handlers) Add(_handlerOwners, h.Name, g);
             }
             foreach (var node in f.Root!.SelfAndDescendants())
-                foreach (var (prop, raw) in node.Properties)
+                foreach (var (prop, raw) in node.Properties.Select(p => (p.Key, p.Value)).Concat(node.NestedProperties))
                 {
                     if (NonReferenceProps.Contains(prop)) continue;
                     var val = PropertyValue.Unquote(raw);
-                    if (val != null && f.Groups.TryGetValue(val, out var target) && target != node.Group)
-                        _designRefs.Add((node, prop, target));
+                    if (val == null || !f.Groups.TryGetValue(val, out var target) || target == node.Group) continue;
+                    if (TabControlRx.IsMatch(prop) && node.PropertyLines.ContainsKey(prop)) _tabRefs.Add((node, prop, target));
+                    else _designRefs.Add((node, prop, target));
                 }
         }
 
@@ -131,7 +187,7 @@ public sealed class CleanupAnalyzer
             if (t.Kind == TokKind.String && _groupsByName.ContainsKey(t.Text.Trim())) u.Strings.Add(t.Text.Trim());
             else if (t.Kind == TokKind.Ident)
             {
-                if (t.Is("Controls")) u.UsesControls = true;
+                if (t.Is("Controls")) ResolveControlsCollection(u, toks, s, i);
                 if (u.Proc?.Header != u && _handlerOwners.ContainsKey(t.Text)) u.CalledNames.Add(t.Text);
             }
         }
@@ -162,7 +218,17 @@ public sealed class CleanupAnalyzer
             }
         }
 
-        if (removable != null && f.IsInsideRoot) u.Target = removable;
+        if (removable != null && f.IsInsideRoot)
+        {
+            // Deleting the statement would also skip the call, so the line has to stay.
+            var call = Enumerable.Range(s, e - s)
+                .Where(i => !removable.Excluded.Contains(i) && toks[i].Kind == TokKind.Ident && _userFunctions.Contains(toks[i].Text))
+                .Select(i => toks[i].Text).FirstOrDefault();
+            if (call == null) u.Target = removable;
+            else
+                foreach (var g in removable.Groups)
+                    u.BlockRefs.Add(new BlockRef(g, $"Satır {call} fonksiyonunu çağırıyor, silinirse yan etkisi kaybolur — {u.Location}: {Snip(u.Text)}"));
+        }
 
         for (int i = s; i < e; i++)
         {
@@ -172,8 +238,29 @@ public sealed class CleanupAnalyzer
             var reason = ambiguous
                 ? $"Belirsiz nesne üzerinden erişim — {u.Location}: {Snip(u.Text)}"
                 : $"Kodda kullanılıyor — {u.Location}: {Snip(u.Text)}";
-            foreach (var g in refs) u.BlockRefs.Add(new BlockRef(g, reason));
+            foreach (var g in refs)
+                if (g != u.Target?.Group) // "txt.Text = txt.Text & x" only touches txt itself
+                    u.BlockRefs.Add(new BlockRef(g, reason));
         }
+    }
+
+    /// <summary>Records whose Controls collection the token at <paramref name="i"/> refers to.</summary>
+    void ResolveControlsCollection(CodeUnit u, List<Token> toks, int s, int i)
+    {
+        var f = u.File;
+        bool dotted = i - 1 >= s && toks[i - 1].IsMemberAccess;
+        if (!dotted)
+        {
+            if (f.HasDesigner) u.ControlsForms.Add(f);
+            return;
+        }
+        if (i - 2 >= s && toks[i - 2].Kind == TokKind.Ident && !(i - 3 >= s && toks[i - 3].IsMemberAccess))
+        {
+            var q = toks[i - 2].Text;
+            if (SelfNames.Contains(q) && f.HasDesigner) { u.ControlsForms.Add(f); return; }
+            if (_formsByName.TryGetValue(q, out var forms)) { u.ControlsForms.AddRange(forms); return; }
+        }
+        u.ControlsUnknown = true;
     }
 
     static string Snip(string s) => s.Length <= 90 ? s : s[..87] + "...";
@@ -276,7 +363,11 @@ public sealed class CleanupAnalyzer
             var kind = TargetKind.Write;
             if (isVisible)
             {
-                bool hide = p + 2 == b && (toks[p + 1].Is("False") || (toks[p + 1].Kind == TokKind.Number && toks[p + 1].Text == "0"));
+                // False, 0, vbFalse — also wrapped in parentheses: (False)
+                int ra = p + 1, rb = b;
+                while (rb - ra >= 3 && toks[ra].Kind == TokKind.LParen && VbLexer.MatchParen(toks, ra, rb) == rb - 1) { ra++; rb--; }
+                bool hide = rb - ra == 1
+                    && (toks[ra].Is("False") || toks[ra].Is("vbFalse") || (toks[ra].Kind == TokKind.Number && toks[ra].Text == "0"));
                 kind = hide ? TargetKind.VisibleHide : TargetKind.VisibleShow;
             }
             return new AssignMatch(groups, kind, index, indexUnknown, excluded);
@@ -292,16 +383,17 @@ public sealed class CleanupAnalyzer
 
     void ComputeStaticReasons(AnalysisResult result)
     {
+        var allUnits = _project.Files.SelectMany(f => f.Units).ToList();
+        _formsUsingControls = allUnits.SelectMany(u => u.ControlsForms).ToHashSet();
+        foreach (var u in allUnits.Where(u => u.ControlsUnknown).GroupBy(u => u.File).Select(g => g.First()))
+            result.Warnings.Add($"{u.File.DisplayName} hangi forma ait olduğu belirsiz bir 'Controls' koleksiyonu kullanıyor ({u.Location}); "
+                                + "formların kontrollerini döngüyle gösteren kod varsa kontrol edin.");
+
         foreach (var f in _project.Files)
         {
-            if (!f.HasDesigner)
-            {
-                if (f.Units.Any(u => u.UsesControls))
-                    result.Warnings.Add($"{f.DisplayName} 'Controls' koleksiyonunu kullanıyor; formların kontrollerini döngüyle gösteren kod varsa kontrol edin.");
-                continue;
-            }
+            if (!f.HasDesigner) continue;
 
-            bool controlsUsed = _options.SkipFormsUsingControlsCollection && f.Units.Any(u => u.UsesControls);
+            bool controlsUsed = _options.SkipFormsUsingControlsCollection && _formsUsingControls.Contains(f);
             foreach (var g in f.Groups.Values)
             {
                 g.StaticReasons.Clear();
@@ -317,6 +409,10 @@ public sealed class CleanupAnalyzer
                     if (el.IsMenu && el.Properties.ContainsKey("Shortcut"))
                         AddStatic(g, "Menüde kısayol tuşu tanımlı (gizliyken de çalışabilir)");
                 }
+
+                foreach (var h in g.Handlers.Where(h => h.HasBody))
+                    if (!InteractiveEvents.Contains(h.Name[(h.Name.LastIndexOf('_') + 1)..]))
+                        AddStatic(g, $"{h.Name} olayı kullanıcı etkileşimi olmadan da tetiklenebilir");
             }
         }
 
@@ -341,7 +437,7 @@ public sealed class CleanupAnalyzer
             g.HasLiveNonVisibleWrite = false;
         }
 
-        var deadProcs = removed.SelectMany(g => g.Handlers).ToHashSet();
+        var deadProcs = DeadProcs(removed);
 
         foreach (var u in _project.Files.SelectMany(f => f.Units))
         {
@@ -411,6 +507,72 @@ public sealed class CleanupAnalyzer
         return groups.Where(g => g.Elements.Count > 0 && g.Elements.All(e => e.WillRemove)).ToHashSet();
     }
 
+    // ---------------------------------------------------------------- dead code
+
+    /// <summary>Procedures whose code can never run: handlers of removed controls and, optionally, unreachable ones.</summary>
+    HashSet<ProcInfo> DeadProcs(HashSet<ControlGroup> removed)
+    {
+        var handlerDead = removed.SelectMany(g => g.Handlers).ToHashSet();
+        if (!_options.RemoveDeadCode) return handlerDead;
+
+        var reachable = new HashSet<ProcInfo>();
+        var queue = new Queue<ProcInfo>();
+        void Mark(ProcInfo p)
+        {
+            if (!handlerDead.Contains(p) && reachable.Add(p)) queue.Enqueue(p);
+        }
+
+        var all = _project.Files.SelectMany(f => f.Procs).ToList();
+        foreach (var p in all.Where(IsEntryPoint)) Mark(p);
+        foreach (var (file, name) in _moduleLevelRefs)
+            foreach (var q in ResolveProc(name, file)) Mark(q);
+        while (queue.Count > 0)
+        {
+            var p = queue.Dequeue();
+            if (!_procRefs.TryGetValue(p, out var names)) continue;
+            foreach (var name in names)
+                foreach (var q in ResolveProc(name, p.File))
+                    Mark(q);
+        }
+        return all.Where(p => !reachable.Contains(p)).ToHashSet();
+    }
+
+    /// <summary>Procedures that can run without being called from project code.</summary>
+    static bool IsEntryPoint(ProcInfo p)
+    {
+        if (!p.File.IsInsideRoot) return true;                // shared file: other projects may call it
+        if (p.Name.Contains('_')) return true;                // events: Form_Load, cmd_Click, WithEvents, Implements
+        if (p.File.Kind == VbFileKind.Module) return p.Name.Equals("Main", StringComparison.OrdinalIgnoreCase);
+        if (p.File.Kind is VbFileKind.Class or VbFileKind.UserControl or VbFileKind.PropertyPage
+            or VbFileKind.UserDocument or VbFileKind.Designer) return !p.IsPrivate; // object members, callable from outside
+        return false;                                         // form procedure: only through a call
+    }
+
+    IEnumerable<ProcInfo> ResolveProc(string name, VbSourceFile from) =>
+        _procsByName.TryGetValue(name, out var list) ? list.Where(q => q.File == from || !q.IsPrivate) : Enumerable.Empty<ProcInfo>();
+
+    /// <summary>Dead procedures that must be deleted: they use a removed control or call a deleted procedure.</summary>
+    HashSet<ProcInfo> ProcsToDelete(HashSet<ControlGroup> removed, HashSet<ProcInfo> dead)
+    {
+        var delete = removed.SelectMany(g => g.Handlers).ToHashSet();
+        foreach (var p in dead.Where(p => p.File.IsInsideRoot && p.EndLine >= 0))
+            if (p.Units.Any(u => u.BlockRefs.Any(r => removed.Contains(r.Group))
+                                 || (u.Target != null && u.Target.Groups.Any(removed.Contains))
+                                 || u.VisEffects.Any(v => removed.Contains(v.Group))))
+                delete.Add(p);
+
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            foreach (var p in dead.Where(p => !delete.Contains(p) && p.File.IsInsideRoot && p.EndLine >= 0))
+                if (_procRefs.TryGetValue(p, out var names)
+                    && names.Any(n => ResolveProc(n, p.File).Any(q => q != p && delete.Contains(q))))
+                    changed = delete.Add(p) || changed;
+        }
+        return delete;
+    }
+
     void ComputeVisibility(ControlNode root)
     {
         foreach (var n in root.Descendants())
@@ -448,21 +610,24 @@ public sealed class CleanupAnalyzer
 
     // ---------------------------------------------------------------- results
 
-    void Verify(HashSet<ControlGroup> removed, AnalysisResult result)
+    /// <summary>Checks that no code surviving the cleanup still names a removed control or a deleted procedure.</summary>
+    void Verify(HashSet<ControlGroup> removed, HashSet<ProcInfo> deleted, AnalysisResult result)
     {
-        var deadProcs = removed.SelectMany(g => g.Handlers).ToHashSet();
         foreach (var u in _project.Files.SelectMany(f => f.Units))
         {
-            if (u.Proc != null && deadProcs.Contains(u.Proc)) continue;
+            if (u.Proc != null && deleted.Contains(u.Proc)) continue;
             if (u.Target?.Group is { } tg && removed.Contains(tg)) continue;
-            foreach (var r in u.BlockRefs.Where(r => removed.Contains(r.Group) && r.Group != u.Proc?.HandlerOwner))
+            foreach (var r in u.BlockRefs.Where(r => removed.Contains(r.Group)))
                 result.Warnings.Add($"İç tutarlılık uyarısı: {r.Group} silinecek ama hâlâ kullanılıyor — {u.Location}");
+            foreach (var name in u.Line.Tokens.Skip(u.TokStart).Take(u.TokEnd - u.TokStart)
+                         .Where(t => t.Kind == TokKind.Ident).Select(t => t.Text))
+                if (ResolveProc(name, u.File).Any(q => deleted.Contains(q) && q != u.Proc) && u.Proc?.Header != u)
+                    result.Warnings.Add($"İç tutarlılık uyarısı: silinecek {name} prosedürü hâlâ çağrılıyor — {u.Location}");
         }
     }
 
-    void BuildResults(AnalysisResult result, HashSet<ControlGroup> removed)
+    void BuildResults(AnalysisResult result, HashSet<ControlGroup> removed, HashSet<ProcInfo> deleted)
     {
-        var deadProcs = removed.SelectMany(g => g.Handlers).ToHashSet();
         foreach (var f in _project.Files)
         {
             var fr = new FileResult { File = f };
@@ -473,14 +638,19 @@ public sealed class CleanupAnalyzer
                     if (n.IsRemovalRoot) fr.RemovalRoots.Add(n);
                     else if (n.EffHidden && !n.WillRemove) fr.KeptHidden.Add(n);
                 }
-                if (_options.SkipFormsUsingControlsCollection && f.Units.Any(u => u.UsesControls))
+                if (_options.SkipFormsUsingControlsCollection && _formsUsingControls.Contains(f))
                     fr.Notes.Add("Form kodu Controls koleksiyonunu kullandığı için bu formda kontrol silinmedi.");
             }
-            fr.RemovedProcs.AddRange(f.Procs.Where(deadProcs.Contains));
+            fr.RemovedProcs.AddRange(f.Procs.Where(p => deleted.Contains(p) && p.HandlerOwner is { } o && removed.Contains(o)));
+            fr.DeadCodeProcs.AddRange(f.Procs.Where(p => deleted.Contains(p) && !fr.RemovedProcs.Contains(p)));
             fr.RemovedUnits.AddRange(f.Units.Where(u =>
-                (u.Proc == null || !deadProcs.Contains(u.Proc)) && u.Target?.Group is { } g && removed.Contains(g)));
+                (u.Proc == null || !deleted.Contains(u.Proc)) && u.Target?.Group is { } g && removed.Contains(g)));
             result.Files.Add(fr);
         }
+
+        foreach (var (owner, prop, to) in _tabRefs)
+            if (removed.Contains(to) && !owner.WillRemove)
+                result.Files.Single(fr => fr.File == to.File).TabListRemovals.Add((owner, prop));
     }
 
     /// <summary>Reasons to show for a hidden control that is kept.</summary>

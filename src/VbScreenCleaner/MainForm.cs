@@ -9,6 +9,7 @@ public sealed class MainForm : Form
     readonly TextBox _target = new() { Dock = DockStyle.Fill };
     readonly CheckBox _loadHidden = new() { Text = "Form_Load içinde koşulsuz gizlenen kontrolleri de temizle", Checked = true, AutoSize = true };
     readonly CheckBox _skipControls = new() { Text = "Controls koleksiyonu kullanan formlara dokunma", Checked = true, AutoSize = true };
+    readonly CheckBox _deadCode = new() { Text = "Hiç çağrılmayan prosedürleri ölü kod say (gerekirse sil)", Checked = true, AutoSize = true };
     readonly Button _analyze = new() { Text = "Analiz Et", AutoSize = true };
     readonly Button _clean = new() { Text = "Temizle ve Kaydet", AutoSize = true, Enabled = false };
     readonly Button _checkAll = new() { Text = "Tümünü Seç", AutoSize = true, Enabled = false };
@@ -35,7 +36,7 @@ public sealed class MainForm : Form
         AddPathRow(paths, 1, "Hedef klasör (boş):", _target);
 
         var options = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8, 0, 8, 4) };
-        options.Controls.AddRange(new Control[] { _loadHidden, _skipControls });
+        options.Controls.AddRange(new Control[] { _loadHidden, _skipControls, _deadCode });
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8, 0, 8, 8) };
         buttons.Controls.AddRange(new Control[] { _analyze, _clean, _checkAll, _uncheckAll });
@@ -62,6 +63,7 @@ public sealed class MainForm : Form
         _tree.AfterSelect += (_, e) => ShowDetails(e.Node);
         _loadHidden.CheckedChanged += (_, _) => InvalidateAnalysis();
         _skipControls.CheckedChanged += (_, _) => InvalidateAnalysis();
+        _deadCode.CheckedChanged += (_, _) => InvalidateAnalysis();
         _source.TextChanged += (_, _) => InvalidateAnalysis();
     }
 
@@ -84,6 +86,7 @@ public sealed class MainForm : Form
         {
             IncludeHiddenInFormLoad = _loadHidden.Checked,
             SkipFormsUsingControlsCollection = _skipControls.Checked,
+            RemoveDeadCode = _deadCode.Checked,
         };
         if (forcedKeep != null) o.ForcedKeep.UnionWith(forcedKeep);
         return o;
@@ -165,6 +168,7 @@ public sealed class MainForm : Form
             var outside = final.Project.Files.Count(f => !f.IsInsideRoot);
             var msg = $"Temizlik tamamlandı.\n\nSilinen kontrol: {final.TotalRemovedControls}\n"
                       + $"Silinen olay prosedürü: {final.Files.Sum(f => f.RemovedProcs.Count)}\n"
+                      + $"Silinen kullanılmayan prosedür: {final.Files.Sum(f => f.DeadCodeProcs.Count)}\n"
                       + $"Silinen kod ifadesi: {final.Files.Sum(f => f.RemovedUnits.Count)}\n\n"
                       + $"Rapor: {CleanupWriter.ReportFileName}"
                       + (outside > 0 ? $"\n\nDikkat: {outside} dosya proje klasörü dışında olduğu için kopyalanmadı (raporda listelendi)." : "")
@@ -278,6 +282,9 @@ public sealed class MainForm : Form
         lines.Add($"Silinecek kontrol: {fr.RemovedControlCount}");
         lines.Add($"Silinecek olay prosedürü: {fr.RemovedProcs.Count}");
         foreach (var p in fr.RemovedProcs) lines.Add($"   {p.Name}  (satır {p.HeaderLine + 1})");
+        lines.Add($"Silinecek kullanılmayan prosedür: {fr.DeadCodeProcs.Count}");
+        foreach (var p in fr.DeadCodeProcs) lines.Add($"   {p.Name}  (satır {p.HeaderLine + 1})");
+        foreach (var (owner, prop) in fr.TabListRemovals) lines.Add($"Sekme listesi güncellenecek: {owner.DisplayName}.{prop}");
         lines.Add($"Silinecek kod ifadesi: {fr.RemovedUnits.Count}");
         foreach (var u in fr.RemovedUnits) lines.Add($"   satır {u.Line.FirstLine + 1}: {u.Text}");
         return string.Join("\r\n", lines);

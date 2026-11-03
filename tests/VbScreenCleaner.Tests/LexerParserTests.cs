@@ -102,7 +102,7 @@ public sealed class ParserTests : IDisposable
         Assert.Equal(1, cont.LastLine - cont.FirstLine);
 
         var labelled = f.LogicalLines.Single(l => l.Label != null);
-        Assert.Equal("Hata", labelled.Label);
+        Assert.Equal("Hata:", labelled.Label);
         Assert.Equal(new[] { "lbl.Caption = \"1\"", "y = 2" }, labelled.Units.Select(u => u.Text));
 
         var ifLine = f.LogicalLines.Single(l => l.Code.Contains("Else z"));

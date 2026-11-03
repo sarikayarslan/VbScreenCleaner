@@ -1,11 +1,11 @@
 ﻿using VbScreenCleaner.Core;
 
 // Usage:
-//   VbScreenCleaner.Cli analyze <projectDir> [--no-load-hidden] [--no-skip-controls]
-//   VbScreenCleaner.Cli clean   <projectDir> <targetDir> [--no-load-hidden] [--no-skip-controls]
+//   VbScreenCleaner.Cli analyze <projectDir> [--no-load-hidden] [--no-skip-controls] [--no-dead-code]
+//   VbScreenCleaner.Cli clean   <projectDir> <targetDir> [--no-load-hidden] [--no-skip-controls] [--no-dead-code]
 if (args.Length < 2 || (args[0] == "clean" && args.Length < 3))
 {
-    Console.WriteLine("Kullanım: analyze <proje klasörü> | clean <proje klasörü> <hedef klasör>  [--no-load-hidden] [--no-skip-controls]");
+    Console.WriteLine("Kullanım: analyze <proje klasörü> | clean <proje klasörü> <hedef klasör>  [--no-load-hidden] [--no-skip-controls] [--no-dead-code]");
     return 1;
 }
 
@@ -13,6 +13,7 @@ var options = new CleanupOptions
 {
     IncludeHiddenInFormLoad = !args.Contains("--no-load-hidden"),
     SkipFormsUsingControlsCollection = !args.Contains("--no-skip-controls"),
+    RemoveDeadCode = !args.Contains("--no-dead-code"),
 };
 
 var project = VbProject.Load(args[1]);

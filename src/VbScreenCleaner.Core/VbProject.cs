@@ -120,7 +120,8 @@ public sealed class VbProject
 public static class VbParser
 {
     static readonly Regex BeginRx = new(@"^\s*Begin\s+(\S+)\s+(\S+)\s*$", RegexOptions.Compiled);
-    static readonly Regex PropRx = new(@"^\s*([A-Za-z_]\w*)\s*=\s*(.*)$", RegexOptions.Compiled);
+    // Property names may be indexed/dotted, e.g. SSTab's  Tab(0).Control(1)=   "txtX"
+    static readonly Regex PropRx = new(@"^\s*([A-Za-z_][\w.()]*)\s*=\s*(.*)$", RegexOptions.Compiled);
     static readonly Regex VbNameRx = new(@"^\s*Attribute\s+VB_Name\s*=\s*""([^""]*)""", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     static readonly HashSet<string> ProcModifiers = new(StringComparer.OrdinalIgnoreCase) { "Public", "Private", "Friend", "Static", "Global" };
@@ -191,9 +192,14 @@ public static class VbParser
                     break;
                 }
             }
-            else if (propDepth == 0 && PropRx.Match(line) is { Success: true } pm)
+            else if (PropRx.Match(line) is { Success: true } pm)
             {
-                stack.Peek().Properties[pm.Groups[1].Value] = pm.Groups[2].Value;
+                if (propDepth == 0)
+                {
+                    stack.Peek().Properties[pm.Groups[1].Value] = pm.Groups[2].Value;
+                    stack.Peek().PropertyLines[pm.Groups[1].Value] = i;
+                }
+                else stack.Peek().NestedProperties.Add((pm.Groups[1].Value, pm.Groups[2].Value));
             }
         }
 
@@ -255,13 +261,21 @@ public static class VbParser
             var segments = VbLexer.SplitColons(toks, 0, toks.Count);
             int segIdx = 0;
 
-            // Leading line label: "Label:" (identifier or line number directly followed by a colon).
-            if (segments.Count > 0 && segments[0] is var (s0, e0) && e0 - s0 == 1 && e0 < toks.Count
-                && toks[e0].Kind == TokKind.Colon
-                && (toks[s0].Kind == TokKind.Number || (toks[s0].Kind == TokKind.Ident && !NonLabelKeywords.Contains(toks[s0].Text))))
+            // Leading line label, kept verbatim: "Label:" / "10:" or a bare line number "10 stmt".
+            if (segments.Count > 0 && segments[0] is var (s0, e0))
             {
-                ll.Label = codeText[toks[s0].Start..toks[s0].End];
-                segIdx = 1;
+                if (e0 - s0 == 1 && e0 < toks.Count && toks[e0].Kind == TokKind.Colon
+                    && (toks[s0].Kind == TokKind.Number || (toks[s0].Kind == TokKind.Ident && !NonLabelKeywords.Contains(toks[s0].Text))))
+                {
+                    ll.Label = codeText[toks[s0].Start..toks[e0].End];
+                    segIdx = 1;
+                }
+                else if (toks[s0].Kind == TokKind.Number)
+                {
+                    ll.Label = codeText[toks[s0].Start..toks[s0].End];
+                    if (e0 - s0 == 1) segIdx = 1;
+                    else segments[0] = (s0 + 1, e0);
+                }
             }
 
             var units = new List<CodeUnit>();
@@ -271,7 +285,9 @@ public static class VbParser
                 if (toks[s].Is("If"))
                 {
                     int thenIdx = VbLexer.FindIdent(toks, s, e, "Then");
-                    if (thenIdx >= 0 && thenIdx < e - 1)
+                    bool codeAfterThen = thenIdx >= 0
+                        && (thenIdx < e - 1 || toks.Skip(e).Any(t => t.Kind != TokKind.Colon)); // "If x Then: y" too
+                    if (codeAfterThen)
                     {
                         // Single-line If: everything to the end of the line belongs to it.
                         units.Add(new CodeUnit { File = f, Line = ll, TokStart = s, TokEnd = toks.Count, IsSingleLineIf = true });
@@ -286,9 +302,9 @@ public static class VbParser
                 ll.Units.Add(u);
                 f.Units.Add(u);
 
-                if (TryProcHeader(toks, u.TokStart, u.TokEnd, out var name, out var kind))
+                if (TryProcHeader(toks, u.TokStart, u.TokEnd, out var name, out var kind, out var isPrivate))
                 {
-                    cur = new ProcInfo { File = f, Name = name, Kind = kind, HeaderLine = ll.FirstLine };
+                    cur = new ProcInfo { File = f, Name = name, Kind = kind, HeaderLine = ll.FirstLine, IsPrivate = isPrivate };
                     f.Procs.Add(cur);
                     cur.Header = u;
                     cur.Units.Add(u);
@@ -318,11 +334,16 @@ public static class VbParser
         }
     }
 
-    static bool TryProcHeader(List<Token> t, int s, int e, out string name, out string kind)
+    static bool TryProcHeader(List<Token> t, int s, int e, out string name, out string kind, out bool isPrivate)
     {
         name = kind = "";
+        isPrivate = false;
         int p = s;
-        while (p < e && t[p].Kind == TokKind.Ident && ProcModifiers.Contains(t[p].Text)) p++;
+        while (p < e && t[p].Kind == TokKind.Ident && ProcModifiers.Contains(t[p].Text))
+        {
+            if (t[p].Is("Private")) isPrivate = true;
+            p++;
+        }
         if (p >= e || t[p].Kind != TokKind.Ident) return false;
         if (t[p].Is("Sub") || t[p].Is("Function"))
         {

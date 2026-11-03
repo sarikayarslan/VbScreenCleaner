@@ -60,6 +60,10 @@ public sealed class EdgeCaseTests : IDisposable
     [Theory]
     [InlineData("lbl.Visible = False", true)]
     [InlineData("lbl.Visible = 0", true)]
+    [InlineData("lbl.Visible = vbFalse", true)]
+    [InlineData("lbl.Visible = (False)", true)]
+    [InlineData("lbl.Visible = ((0))", true)]
+    [InlineData("lbl.Visible = (False) Or x", false)]
     [InlineData("If a Then lbl.Visible = False", false)]
     [InlineData("If a Then\r\n        lbl.Visible = False\r\n    End If", false)]
     [InlineData("Do While a\r\n        lbl.Visible = False\r\n    Loop", false)]
@@ -155,6 +159,82 @@ public sealed class EdgeCaseTests : IDisposable
             ["Mod.bas"] = Vb.Module("Mod", "Sub Goster(f As Form)\r\n    Dim c As Control\r\n    For Each c In f.Controls\r\n        c.Visible = True\r\n    Next\r\nEnd Sub\r\n"),
         });
         Assert.Contains(r.Warnings, w => w.Contains("Mod.bas") && w.Contains("Controls"));
+    }
+
+    // ------------------------------------------------------------------ dead code
+
+    [Fact]
+    public void Uncalled_private_sub_does_not_keep_a_control_and_is_deleted()
+    {
+        var r = One(Hidden, "Private Sub Eski()\r\n    MsgBox txtH.Text\r\nEnd Sub\r\n");
+        Assert.True(r.IsRemoved("frmT", "txtH"));
+        Assert.Equal(new[] { "Eski" }, r.For("frmT").DeadCodeProcs.Select(p => p.Name));
+        Assert.DoesNotContain("Eski", r.Output("frmT"));
+    }
+
+    [Fact]
+    public void Dead_code_option_off_keeps_the_old_behaviour()
+    {
+        var o = new CleanupOptions { RemoveDeadCode = false };
+        var r = One(Hidden, "Private Sub Eski()\r\n    MsgBox txtH.Text\r\nEnd Sub\r\n", o);
+        Assert.False(r.IsRemoved("frmT", "txtH"));
+        Assert.Empty(r.For("frmT").DeadCodeProcs);
+    }
+
+    [Theory]
+    [InlineData("Private Sub Form_Load()\r\n    Goster\r\nEnd Sub\r\nPrivate Sub Goster()\r\n    MsgBox txtH.Text\r\nEnd Sub\r\n")]   // called
+    [InlineData("Private Sub Form_Load()\r\n    Call Goster\r\nEnd Sub\r\nPrivate Sub Goster()\r\n    MsgBox txtH.Text\r\nEnd Sub\r\n")]
+    [InlineData("Private Sub Form_Load()\r\n    x = Hesap()\r\nEnd Sub\r\nPrivate Function Hesap()\r\n    Hesap = txtH.Text\r\nEnd Function\r\n")]
+    [InlineData("Private Sub Form_Load()\r\n    CallByName Me, \"Goster\", VbMethod\r\nEnd Sub\r\nPublic Sub Goster()\r\n    MsgBox txtH.Text\r\nEnd Sub\r\n")]
+    [InlineData("Private Sub Form_Load()\r\n    p = AddressOf Goster\r\nEnd Sub\r\nPrivate Sub Goster()\r\n    MsgBox txtH.Text\r\nEnd Sub\r\n")]
+    [InlineData("Private Sub IArayuz_Yap()\r\n    MsgBox txtH.Text\r\nEnd Sub\r\n")]                                // Implements / WithEvents
+    [InlineData("Private Sub Form_Load()\r\n    A\r\nEnd Sub\r\nPrivate Sub A()\r\n    B\r\nEnd Sub\r\nPrivate Sub B()\r\n    MsgBox txtH.Text\r\nEnd Sub\r\n")]
+    public void Reachable_procedures_still_keep_controls(string code)
+    {
+        var r = One(Hidden, code);
+        Assert.False(r.IsRemoved("frmT", "txtH"));
+        Assert.Empty(r.For("frmT").DeadCodeProcs);
+    }
+
+    [Fact]
+    public void Public_form_procedure_called_from_a_module_is_live_only_if_the_module_procedure_is()
+    {
+        var files = new Dictionary<string, string>
+        {
+            ["frmT.frm"] = Vb.Form("frmT", Hidden, "Public Sub Yenile()\r\n    MsgBox txtH.Text\r\nEnd Sub\r\n"),
+            ["Mod.bas"] = Vb.Module("Mod", "Sub Main()\r\n    frmT.Yenile\r\nEnd Sub\r\n"),
+        };
+        Assert.False(Vb.Analyze(_tmp, files).IsRemoved("frmT", "txtH"));       // Sub Main is the start point
+
+        using var tmp2 = new TempDir();
+        files["Mod.bas"] = Vb.Module("Mod", "Sub Calistir()\r\n    frmT.Yenile\r\nEnd Sub\r\n");
+        var r = Vb.Analyze(tmp2, files);
+        Assert.True(r.IsRemoved("frmT", "txtH"));                              // nothing calls Calistir
+        Assert.Equal(new[] { "Calistir" }, r.For("Mod").DeadCodeProcs.Select(p => p.Name)); // calls deleted Yenile
+        Assert.Equal(new[] { "Yenile" }, r.For("frmT").DeadCodeProcs.Select(p => p.Name));
+    }
+
+    [Fact]
+    public void Public_class_member_is_an_entry_point()
+    {
+        var r = Vb.Analyze(_tmp, new Dictionary<string, string>
+        {
+            ["frmT.frm"] = Vb.Form("frmT", Hidden, ""),
+            ["Cls.cls"] = "VERSION 1.0 CLASS\r\nBEGIN\r\n  MultiUse = -1  'True\r\nEND\r\nAttribute VB_Name = \"Cls\"\r\nOption Explicit\r\n"
+                          + "Public Function Deger() As String\r\n    Deger = frmT.txtH.Text\r\nEnd Function\r\n",
+        });
+        Assert.False(r.IsRemoved("frmT", "txtH"));
+    }
+
+    [Fact]
+    public void Dead_procedure_calling_a_removed_handler_is_deleted_too()
+    {
+        var r = One(Vb.Control("VB.CommandButton", "cmdH", visible: false),
+            "Private Sub cmdH_Click()\r\n    Beep\r\nEnd Sub\r\nPrivate Sub Tetikle()\r\n    cmdH_Click\r\nEnd Sub\r\n");
+        Assert.True(r.IsRemoved("frmT", "cmdH"));
+        Assert.Equal(new[] { "cmdH_Click" }, r.For("frmT").RemovedProcs.Select(p => p.Name));
+        Assert.Equal(new[] { "Tetikle" }, r.For("frmT").DeadCodeProcs.Select(p => p.Name));
+        Assert.DoesNotContain(r.Warnings, w => w.Contains("İç tutarlılık"));
     }
 
     [Fact]

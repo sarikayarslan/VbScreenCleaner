@@ -25,7 +25,7 @@ public sealed class SampleProjectTests(SampleProjectFixture fx) : IClassFixture<
     {
         Assert.Equal(new[]
         {
-            "cmdArrH(0)", "cmdArrH(1)", "cmdExtWrite", "cmdHiddenUnused", "fraHidden", "lblContinued", "lblHideOnLoad",
+            "cmdArrH(0)", "cmdArrH(1)", "cmdExternal", "cmdExtWrite", "cmdHiddenUnused", "fraHidden", "lblContinued", "lblHideOnLoad",
             "lblX", "lvHidden", "mnuAdmin", "mnuOld", "mnuOldA", "txtA", "txtB", "txtHiddenWrite", "txtOnlyInHandler",
         }.OrderBy(n => n), _r.RemovedNames("frmMain"));
     }
@@ -33,8 +33,18 @@ public sealed class SampleProjectTests(SampleProjectFixture fx) : IClassFixture<
     [Fact]
     public void FrmEk_removes_exactly_the_expected_controls()
     {
-        Assert.Equal(new[] { "cmdInPic", "cmdSingleIf", "lblAfterIfBlock", "lstHidden", "picHidden", "txtDefault" }.OrderBy(n => n),
+        Assert.Equal(new[] { "cmdInPic", "cmdSingleIf", "cmdViaVar", "lblAfterIfBlock", "lstHidden", "picHidden", "txtDefault" }.OrderBy(n => n),
             _r.RemovedNames("frmEk"));
+    }
+
+    [Fact]
+    public void Module_procedures_nobody_calls_are_dead_code()
+    {
+        // Module1.Ayarla shows cmdExternal and Dinamik touches cmdViaVar, but nothing calls either procedure.
+        Assert.Equal(new[] { "Ayarla", "Dinamik" }, _r.For("Module1").DeadCodeProcs.Select(p => p.Name));
+        Assert.Empty(_r.For("Module1").RemovedUnits);
+        Assert.DoesNotContain("Sub Ayarla", _r.Output("Module1"));
+        Assert.Contains("Public gAdmin As Boolean", _r.Output("Module1"));
     }
 
     [Fact]
@@ -73,7 +83,6 @@ public sealed class SampleProjectTests(SampleProjectFixture fx) : IClassFixture<
     [InlineData("frmMain", "mnuHiddenShortcut", "kısayol")]
     [InlineData("frmEk", "cmdDyn", "Load cmdDyn(1)")]
     [InlineData("frmEk", "txtBuddy", "updBuddy kontrolünün 'BuddyControl' özelliği")]
-    [InlineData("frmEk", "cmdViaVar", "Belirsiz nesne üzerinden erişim")]   // f.cmdViaVar in Module1
     [InlineData("frmEk", "cmdSetFocus", "cmdSetFocus.SetFocus")]
     [InlineData("frmEk", "cmdMultiIf", "Kodda kullanılıyor")]               // single-line If with two statements
     public void Hidden_but_used_controls_are_kept_with_a_reason(string form, string control, string reasonPart)
@@ -87,7 +96,6 @@ public sealed class SampleProjectTests(SampleProjectFixture fx) : IClassFixture<
 
     [Theory]
     [InlineData("frmMain", "cmdShownInLoad")]   // Visible = True in Form_Load
-    [InlineData("frmMain", "cmdExternal")]      // frmMain.cmdExternal.Visible = True in Module1
     [InlineData("frmMain", "lblCondHide")]      // If gAdmin Then ... .Visible = False
     [InlineData("frmMain", "lblAfterExit")]     // hidden only after "If ... Then Exit Sub"
     [InlineData("frmMain", "mnuPopA")]          // child of a popup menu
@@ -141,7 +149,6 @@ public sealed class SampleProjectTests(SampleProjectFixture fx) : IClassFixture<
             "If gAdmin Then cmdSingleIf.Caption = \"a\"",
         }, _r.For("frmEk").RemovedUnits.Select(u => u.Text));
 
-        Assert.Equal(new[] { "frmMain.cmdExtWrite.Caption = \"yeni\"" }, _r.For("Module1").RemovedUnits.Select(u => u.Text));
     }
 
     [Fact]

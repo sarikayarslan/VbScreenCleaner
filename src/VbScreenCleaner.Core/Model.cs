@@ -40,6 +40,10 @@ public sealed class ControlNode
     public ControlNode? Parent { get; init; }
     public List<ControlNode> Children { get; } = new();
     public Dictionary<string, string> Properties { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Line index of each top-level property.</summary>
+    public Dictionary<string, int> PropertyLines { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Properties inside BeginProperty blocks (fonts, OCX sub-objects).</summary>
+    public List<(string Name, string Value)> NestedProperties { get; } = new();
     public ControlGroup? Group { get; set; }
 
     // Analysis state
@@ -134,7 +138,7 @@ public sealed class LogicalLine
     public required string Code { get; init; }
     public required string Comment { get; init; }
     public required List<Token> Tokens { get; init; }
-    /// <summary>Token index range of a leading line label (e.g. "ErrHandler:"), if any.</summary>
+    /// <summary>Leading line label exactly as written ("ErrHandler:", "10:" or "10"), if any.</summary>
     public string? Label { get; set; }
     public List<CodeUnit> Units { get; } = new();
 }
@@ -176,7 +180,10 @@ public sealed class CodeUnit
     public List<VisEffect> VisEffects { get; } = new();
     public List<string> CalledNames { get; } = new();
     public List<string> Strings { get; } = new();
-    public bool UsesControls { get; set; }
+    /// <summary>Forms whose Controls collection this statement touches (Me.Controls, frmX.Controls).</summary>
+    public List<VbSourceFile> ControlsForms { get; } = new();
+    /// <summary>Touches the Controls collection of an object whose form cannot be determined.</summary>
+    public bool ControlsUnknown { get; set; }
 
     public string Text
     {
@@ -197,7 +204,8 @@ public sealed class CodeUnit
         VisEffects.Clear();
         CalledNames.Clear();
         Strings.Clear();
-        UsesControls = false;
+        ControlsForms.Clear();
+        ControlsUnknown = false;
     }
 }
 
@@ -207,6 +215,7 @@ public sealed class ProcInfo
     public required string Name { get; init; }
     public required string Kind { get; init; }
     public required int HeaderLine { get; init; }
+    public bool IsPrivate { get; init; }
     public int EndLine { get; set; } = -1;
     public CodeUnit? Header { get; set; }
     public CodeUnit? End { get; set; }

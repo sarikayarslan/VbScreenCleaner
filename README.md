@@ -55,6 +55,7 @@ VB Screen Cleaner tüm projeyi tarar, bu kontrollerden **gerçekten hiç görün
 |---|---|---|
 | Form_Load içinde koşulsuz gizlenen kontrolleri de temizle | Açık | Tasarımda görünür olup `Form_Load` içinde hiçbir koşula bağlı olmadan `Visible = False` yapılan kontrolleri de siler. Kapatırsan yalnızca tasarımda `Visible = False` olanlar değerlendirilir. |
 | Controls koleksiyonu kullanan formlara dokunma | Açık | Kodu `Me.Controls(...)` veya `For Each c In Controls` kullanan formlarda hiçbir şey silinmez, çünkü bu formlarda kontrollere çalışma anında üretilen adlarla erişilebilir. **Açık bırakılması önerilir.** |
+| Hiç çağrılmayan prosedürleri ölü kod say | Açık | Hiçbir yerden çağrılmayan prosedürlerdeki kod kontrolleri korumaz. Böyle bir prosedür silinen bir kontrolü kullanıyorsa prosedür de silinir (bkz. [Ölü kod](#ölü-kod-hiç-çağrılmayan-prosedürler)). |
 
 ---
 
@@ -67,7 +68,7 @@ VbScreenCleaner.Cli.exe clean   "D:\Projeler\EskiProje" "D:\Projeler\EskiProje_T
 
 - `analyze`: hiçbir dosyaya dokunmaz, raporu ekrana yazar.
 - `clean`: projeyi hedefe kopyalar, temizler, raporu hedefe yazar.
-- Ek bayraklar: `--no-load-hidden` (Form_Load kuralını kapatır), `--no-skip-controls` (Controls koleksiyonu kullanan formları da temizler).
+- Ek bayraklar: `--no-load-hidden` (Form_Load kuralını kapatır), `--no-skip-controls` (Controls koleksiyonu kullanan formları da temizler), `--no-dead-code` (ölü kod analizini kapatır).
 
 ---
 
@@ -75,7 +76,7 @@ VbScreenCleaner.Cli.exe clean   "D:\Projeler\EskiProje" "D:\Projeler\EskiProje_T
 
 ### Bir kontrol ne zaman "hiç görünmez" sayılır?
 
-Aşağıdakilerden biri doğruysa **ve** kodun hiçbir yerinde görünür yapılmıyorsa (`.Visible = True`, `.Visible = degisken`, `.Visible = Not x` …):
+Aşağıdakilerden biri doğruysa **ve** çalışabilen kodun hiçbir yerinde görünür yapılmıyorsa (`.Visible = True`, `.Visible = degisken`, `.Visible = Not x` …). Gizleme olarak `False`, `0`, `vbFalse` ve bunların parantezli hâlleri (`(False)`) kabul edilir:
 
 1. Tasarımda `Visible = False`.
 2. Tasarımda görünür ama `Form_Load` / `Form_Initialize` / `MDIForm_Load` içinde **koşulsuz** gizleniyor:
@@ -109,6 +110,9 @@ Gizli olsa bile aşağıdakilerden biri varsa **silinmez**:
 | Başka bir kontrolün tasarım özelliği ona bağlı | UpDown `BuddyControl`, ListView `Icons` / `ImageList`, `DataSource` |
 | Klavyeyle tetiklenebilir | `Default` / `Cancel` = True buton, kısayol tuşu tanımlı menü |
 | Değeri koddan değişiyor **ve** olay prosedürü var | `chkX.Value = 1` + `chkX_Click` (olay tetiklenir) |
+| Kullanıcı etkileşimi olmadan tetiklenen olayı var | `picX_Resize`, `datX_Reposition`, OCX'lerin kendi olayları |
+| Değer atayan satır projedeki bir fonksiyonu çağırıyor | `lblX.Caption = SayacArttir()` — satır silinirse yan etki kaybolur |
+| Başka bir formun / modülün kodu bu formun `Controls` koleksiyonunu geziyor | `For Each c In frmX.Controls` → frmX'e hiç dokunulmaz |
 | Kontrol dizisinin bazı elemanları görünür | `cmd(0)` gizli, `cmd(1)` görünür |
 | Dosya proje klasörünün dışındaki ortak bir modülden kullanılıyor | `..\Ortak\Genel.bas` |
 
@@ -120,15 +124,42 @@ Gizli olsa bile aşağıdakilerden biri varsa **silinmez**:
   - `txtX.Text = "..."`, `txtX = "..."` (varsayılan özellik), `cmdX.Font.Bold = True`, `Set picX.Picture = …`
   - `lstX.Clear`, `lstX.AddItem …`, `lstX.RemoveItem …`, `ctl.Move …`, `ctl.ZOrder`, `ctl.Refresh`, `picX.Cls`
   - `ctl.Visible = False`
-  - `If kosul Then txtX.Text = "..."` (tek ifadeli, `Else`'siz tek satır If)
+  - `If kosul Then txtX.Text = "..."` ve `If kosul Then: txtX.Text = "..."` (tek ifadeli, `Else`'siz tek satır If — satırın tamamı silinir)
   - Diğer formlardan / modüllerden yazılanlar: `frmMain.cmdX.Caption = "..."`
 
 Silme **zincirleme** çalışır: gizli bir butonun `_Click` prosedürü başka bir gizli kontrolü kullanıyorsa, buton silinince o kontrol de bir sonraki turda silinir.
 
+### SSTab sekmeleri
+
+SSTab her sekmedeki kontrolleri `Tab(n).Control(k)= "ad"` satırlarıyla listeler. Sekme üzerindeki gizli bir kontrol silinince:
+
+- `Tab(n).Control(k)` ve `Tab(n).Control(k).Enabled` satırları silinir,
+- aynı sekmedeki sonraki kayıtlar yeniden numaralanır (`Control(2)` → `Control(1)` …),
+- `Tab(n).ControlCount` güncellenir.
+
+### Ölü kod (hiç çağrılmayan prosedürler)
+
+Hiçbir yerden çağrılmayan bir prosedürün kodu hiçbir zaman çalışmaz. Bu yüzden:
+
+- İçindeki kullanımlar kontrolleri **korumaz** (`Private Sub Eski()` içindeki `s = txtX.Text` gibi).
+- Böyle bir prosedür silinen bir kontrolü kullanıyorsa **prosedür de silinir**; onu çağıran diğer ölü prosedürler de (proje derlenmeye devam etsin diye).
+- Silinen kontrollerle ilgisi olmayan ölü prosedürlere dokunulmaz.
+
+Başlangıç noktası sayılan (her zaman çalışabilir) prosedürler:
+
+| Prosedür | Neden |
+|---|---|
+| Olaylar: `Form_Load`, `cmdX_Click`, `Class_Initialize`, `mObj_Olay` (WithEvents), `IArayuz_Metot` (Implements) | VB kendisi çağırır (adında `_` olan her prosedür) |
+| Modüldeki `Sub Main` | Başlangıç prosedürü |
+| Sınıf, UserControl, PropertyPage, UserDocument'taki `Public` / `Friend` üyeler | Nesne üzerinden dışarıdan çağrılabilir |
+| Proje klasörü dışındaki dosyalardaki prosedürler | Başka projeler kullanıyor olabilir |
+
+Bunlardan ulaşılabilen her prosedür de çalışır sayılır. "Ulaşılabilir" geniş tutulur: prosedür adı canlı kodda bir kelime olarak (`Yenile`, `Call Yenile`, `frmX.Yenile`, `AddressOf Yenile`) ya da metin olarak (`CallByName Me, "Yenile", VbMethod`) geçiyorsa çağrılıyor kabul edilir.
+
 Kod yeniden yazılırken:
 
 - `a.Text = "x": Debug.Print "y"` → `Debug.Print "y"` (aynı satırdaki diğer ifadeler korunur)
-- `ErrH: txtX.Text = ""` → `ErrH:` (satır etiketi korunur)
+- `ErrH: txtX.Text = ""` → `ErrH:` ve `10 txtX.Text = ""` → `10` (satır etiketi / satır numarası korunur)
 - ` _` ile birden fazla satıra bölünmüş ifadeler bütün olarak silinir
 - Değişmeyen satırların byte'larına dokunulmaz
 
@@ -164,6 +195,8 @@ VB5 dosyaları ANSI'dir (Türkçe için Windows-1254). Araç dosyaları byte dü
 
 - **SİLİNEN KONTROLLER** — satır numarası ve gizli olma nedeniyle; altında birlikte silinen alt kontroller
 - **SİLİNEN OLAY PROSEDÜRLERİ**
+- **SİLİNEN KULLANILMAYAN PROSEDÜRLER** — ölü kod olup silinen kontrolleri kullandığı için silinenler
+- **GÜNCELLENEN SEKME LİSTELERİ** — SSTab'da kaldırılan `Tab(n).Control(k)` kayıtları
 - **SİLİNEN KOD İFADELERİ** — orijinal satır numarasıyla
 - **GİZLİ AMA KORUNAN KONTROLLER** — her biri için koruma nedeni ve nedenin geçtiği `dosya:satır`
 - **UYARILAR** — klasör dışındaki dosyalar, `Controls` koleksiyonu kullanan modüller, bulunamayan dosyalar
@@ -173,6 +206,7 @@ VB5 dosyaları ANSI'dir (Türkçe için Windows-1254). Araç dosyaları byte dü
 ## Bilinen sınırlar
 
 - `Form_Load` gizleme işini başka bir yardımcı prosedüre bırakıyorsa (`Call EkraniHazirla`) bu kontroller "Form_Load'da gizlenen" sayılmaz, korunur.
+- Ölü kod analizi yalnızca taranan dosyalara bakar. Bir formdaki `Public` prosedür klasörde olmayan başka bir projeden çağrılıyorsa bunu göremez; böyle bir durumda bu seçeneği kapatın.
 - Kullanılmayan hale gelen OCX referansları (`Object = …` satırları) formdan silinmez; zararsızdır.
 - Silinen kontrollerin `.frx` içindeki verileri (resimler vb.) dosyada kalır; VB bir sonraki kayıtta temizler.
 - Araç VB derleyicisi değildir. Temizlenen projeyi **mutlaka VB5 IDE'de derleyip** ekranları kontrol edin.
@@ -208,17 +242,28 @@ src/
     CleanupWriter.cs        Kopyalama, dosyaları yeniden yazma, rapor
   VbScreenCleaner/          WinForms arayüzü
   VbScreenCleaner.Cli/      Komut satırı arayüzü
-tests/VbScreenCleaner.Tests/  xUnit testleri (105 test)
-samples/SampleVb5/          Testlerde kullanılan örnek VB5 projesi
-build/publish.ps1           Dağıtım paketi betiği
+tests/VbScreenCleaner.Tests/  xUnit testleri (227 test)
+samples/SampleVb5/          Temel senaryoları içeren örnek VB5 projesi
+samples/HardVb5/            Zor senaryolar: SSTab, MDI, UserControl, sınıf, Türkçe (1254) adlar, iki .vbp
+build/publish.ps1           Dağıtım betiği
 ```
 
 ### Testler
 
-Testler `samples/SampleVb5` örnek projesi ve test sırasında üretilen küçük projeler üzerinde çalışır:
+```bat
+dotnet test tests\VbScreenCleaner.Tests
+```
 
-- Örnek projede her formda tam olarak hangi kontrollerin silindiği / korunduğu ve nedenleri
-- Temizlenen çıktının yeniden ayrıştırılabilmesi, silinen kontrollere hiçbir referans kalmaması, ikinci temizliğin hiçbir şey silmemesi, değişmeyen dosyaların byte byte aynı olması
-- Okuma, değer atama ve görünür yapmanın onlarca farklı yazımı
-- `Form_Load` içindeki koşullu / koşulsuz gizleme biçimleri
-- Windows-1254 Türkçe karakterlerin ve `.frx` içeriğinin korunması
+- **`samples/SampleVb5`** — her formda tam olarak hangi kontrollerin silindiği / korunduğu ve nedenleri
+- **`samples/HardVb5`** — gerçek VB5 dosya biçiminde (CRLF, Windows-1254) zorlayıcı senaryolar:
+  5 seviye iç içe frame/picturebox, SSTab sekme listelerinin yeniden numaralanması, MDI form, UserControl, `Property Get`'li sınıf,
+  ölü kod zincirleri (`OluA` → `OluB`), `CallByName`, `vbFalse` / `(False)`,
+  Türkçe karakterli kontrol adları, `If x Then:`, satır numaraları, tek satırlık ve satıra bölünmüş prosedür başlıkları,
+  `Forms(0).x` / `Screen.ActiveForm.x` / `With Me`, `#If`, yan etkili fonksiyon çağrıları, `Resize`/`Reposition` olayları,
+  modülden başka formun `Controls` döngüsü, aynı adlı kontroller, iki `.vbp`'nin paylaştığı dosyalar ve hiçbir `.vbp`'de olmayan dosya
+- **Rastgele üretilen projeler** — 60 farklı rastgele proje (iç içe frame'ler, `Form_Load` / olay / modül içinde okuma, yazma,
+  gösterme, gizleme, koşullu ifadeler; modül yarısında çağrılan, yarısında ölü kod). Aracın kararı, kuralları bağımsız olarak
+  uygulayan bir referans hesapla birebir karşılaştırılır
+- **Ölçek testi** — 150 form × 200 kontrol (30.000 kontrol) analiz + yazma + doğrulama birkaç saniyede biter
+- Her senaryoda: temizlenen çıktının yeniden ayrıştırılabilmesi, silinen kontrollere hiçbir referans kalmaması,
+  ikinci temizliğin hiçbir şey silmemesi, değişmeyen dosyaların byte byte aynı olması
