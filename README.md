@@ -8,20 +8,16 @@ Kaynak projeye **asla yazmaz**: projenin tamamını seçtiğin yeni bir klasöre
 
 ## İndir
 
-### ⬇️ [VbScreenCleaner-win-x64.zip](https://github.com/sarikayarslan/VbScreenCleaner/releases/latest/download/VbScreenCleaner-win-x64.zip)
+| Sürüm | İndir | Boyut |
+|---|---|---|
+| **Pencereli uygulama** (önerilen) | ⬇️ [VbScreenCleaner.exe](https://github.com/sarikayarslan/VbScreenCleaner/releases/latest/download/VbScreenCleaner.exe) | ~48 MB |
+| **Komut satırı** (toplu işlem / script için) | ⬇️ [VbScreenCleaner.Cli.exe](https://github.com/sarikayarslan/VbScreenCleaner/releases/latest/download/VbScreenCleaner.Cli.exe) | ~35 MB |
 
-Bu bağlantı her zaman en son sürümü indirir. Zip'i bir klasöre açıp `VbScreenCleaner.exe`'yi çalıştırman yeterli.
+Bağlantılar her zaman en son sürümü indirir. Kurulum yok: exe'yi indirip çalıştırman yeterli.
 
 - Windows 10 / 11, 64 bit
-- **.NET kurulumu gerekmez** (çalışma ortamı exe'nin içinde)
-- Zip içeriği:
-
-| Dosya | Açıklama |
-|---|---|
-| `VbScreenCleaner.exe` | Pencereli uygulama (önerilen) |
-| `VbScreenCleaner.Cli.exe` | Komut satırı sürümü (toplu işlem / script için) |
-| `OrnekProje\` | Aracı denemek için küçük bir VB5 projesi |
-| `README.md` | Bu dosya |
+- **.NET kurulumu gerekmez** (çalışma ortamı exe'nin içinde; boyutun büyük olmasının nedeni budur)
+- Aracı denemek için küçük bir VB5 projesi: [`samples/SampleVb5`](samples/SampleVb5)
 
 > Windows SmartScreen "tanınmayan uygulama" uyarısı verirse **Ek bilgi → Yine de çalıştır** deyin (exe imzalı değildir).
 
@@ -194,7 +190,7 @@ dotnet build VbScreenCleaner.sln -c Release
 dotnet test tests\VbScreenCleaner.Tests
 ```
 
-Dağıtım paketini (`dist\VbScreenCleaner-win-x64.zip`) üretmek için:
+Dağıtım dosyalarını (`dist\VbScreenCleaner.exe` ve `dist\VbScreenCleaner.Cli.exe`) üretmek için:
 
 ```bat
 powershell -ExecutionPolicy Bypass -File build\publish.ps1 -Version 1.0.0
