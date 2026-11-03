@@ -1,0 +1,8 @@
+# VB5 files are ANSI with CRLF; keep their bytes exactly as they are
+*.frm -text
+*.frx binary
+*.bas -text
+*.cls -text
+*.ctl -text
+*.vbp -text
+*.vbg -text
