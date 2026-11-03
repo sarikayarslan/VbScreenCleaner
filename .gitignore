@@ -485,3 +485,6 @@ $RECYCLE.BIN/
 
 # VB5 sample project is test input
 !samples/**/*.vbp
+
+# Release package output (published as a GitHub Release asset)
+dist/
