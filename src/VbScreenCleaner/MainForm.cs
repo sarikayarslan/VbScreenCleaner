@@ -6,7 +6,9 @@ namespace VbScreenCleaner;
 public sealed class MainForm : Form
 {
     readonly TextBox _source = new() { Dock = DockStyle.Fill };
+    readonly TextBox _libs = new() { Dock = DockStyle.Fill, PlaceholderText = "İsteğe bağlı. Birden fazla klasörü ; ile ayırın" };
     readonly TextBox _target = new() { Dock = DockStyle.Fill };
+    readonly CheckBox _cleanLibs = new() { Text = "Lib klasörünü de temizle (yalnızca bu proje kullanıyorsa)", Checked = false, AutoSize = true };
     readonly CheckBox _loadHidden = new() { Text = "Form_Load içinde koşulsuz gizlenen kontrolleri de temizle", Checked = true, AutoSize = true };
     readonly CheckBox _skipControls = new() { Text = "Controls koleksiyonu kullanan formlara dokunma", Checked = true, AutoSize = true };
     readonly CheckBox _deadCode = new() { Text = "Hiç çağrılmayan prosedürleri ölü kod say (gerekirse sil)", Checked = true, AutoSize = true };
@@ -32,11 +34,12 @@ public sealed class MainForm : Form
         paths.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         paths.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         paths.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        AddPathRow(paths, 0, "Kaynak proje klasörü:", _source);
-        AddPathRow(paths, 1, "Hedef klasör (boş):", _target);
+        AddPathRow(paths, 0, "Kaynak proje (frm) klasörü:", _source);
+        AddPathRow(paths, 1, "Lib klasörü:", _libs, append: true);
+        AddPathRow(paths, 2, "Hedef klasör (boş):", _target);
 
         var options = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8, 0, 8, 4) };
-        options.Controls.AddRange(new Control[] { _loadHidden, _skipControls, _deadCode });
+        options.Controls.AddRange(new Control[] { _loadHidden, _skipControls, _deadCode, _cleanLibs });
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8, 0, 8, 8) };
         buttons.Controls.AddRange(new Control[] { _analyze, _clean, _checkAll, _uncheckAll });
@@ -64,16 +67,20 @@ public sealed class MainForm : Form
         _loadHidden.CheckedChanged += (_, _) => InvalidateAnalysis();
         _skipControls.CheckedChanged += (_, _) => InvalidateAnalysis();
         _deadCode.CheckedChanged += (_, _) => InvalidateAnalysis();
+        _cleanLibs.CheckedChanged += (_, _) => InvalidateAnalysis();
         _source.TextChanged += (_, _) => InvalidateAnalysis();
+        _libs.TextChanged += (_, _) => InvalidateAnalysis();
     }
 
-    void AddPathRow(TableLayoutPanel panel, int row, string label, TextBox box)
+    /// <param name="append">Browsing adds the folder to the ';'-separated list instead of replacing it.</param>
+    void AddPathRow(TableLayoutPanel panel, int row, string label, TextBox box, bool append = false)
     {
-        var browse = new Button { Text = "Seç...", AutoSize = true };
+        var browse = new Button { Text = append ? "Ekle..." : "Seç...", AutoSize = true };
         browse.Click += (_, _) =>
         {
-            using var dlg = new FolderBrowserDialog { SelectedPath = box.Text, UseDescriptionForTitle = true, Description = label };
-            if (dlg.ShowDialog(this) == DialogResult.OK) box.Text = dlg.SelectedPath;
+            using var dlg = new FolderBrowserDialog { SelectedPath = append ? "" : box.Text, UseDescriptionForTitle = true, Description = label };
+            if (dlg.ShowDialog(this) != DialogResult.OK) return;
+            box.Text = append && box.Text.Trim().Length > 0 ? box.Text.TrimEnd(' ', ';') + "; " + dlg.SelectedPath : dlg.SelectedPath;
         };
         panel.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 7, 3, 3) }, 0, row);
         panel.Controls.Add(box, 1, row);
@@ -87,10 +94,14 @@ public sealed class MainForm : Form
             IncludeHiddenInFormLoad = _loadHidden.Checked,
             SkipFormsUsingControlsCollection = _skipControls.Checked,
             RemoveDeadCode = _deadCode.Checked,
+            CleanLibraries = _cleanLibs.Checked,
         };
         if (forcedKeep != null) o.ForcedKeep.UnionWith(forcedKeep);
         return o;
     }
+
+    List<string> LibraryDirs() =>
+        _libs.Text.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
     void InvalidateAnalysis()
     {
@@ -110,6 +121,12 @@ public sealed class MainForm : Form
             MessageBox.Show(this, "Geçerli bir kaynak proje klasörü seçin.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
+        var libs = LibraryDirs();
+        if (libs.FirstOrDefault(l => !Directory.Exists(l)) is { } missing)
+        {
+            MessageBox.Show(this, $"Lib klasörü bulunamadı:\n{missing}", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
         if (string.IsNullOrWhiteSpace(_target.Text))
             _target.Text = Path.GetFullPath(src).TrimEnd('\\') + "_Temiz";
 
@@ -117,7 +134,7 @@ public sealed class MainForm : Form
         try
         {
             var options = BuildOptions();
-            _result = await Task.Run(() => CleanupAnalyzer.Analyze(VbProject.Load(src), options));
+            _result = await Task.Run(() => CleanupAnalyzer.Analyze(VbProject.Load(src, libs), options));
             FillTree(_result);
             _status.Text = $"{_result.Project.Files.Count(f => f.HasDesigner)} ekran tarandı · {_result.TotalRemovedControls} kontrol silinecek · "
                            + $"{_result.Files.Sum(f => f.KeptHidden.Count)} gizli kontrol korunuyor · {_result.Warnings.Count} uyarı";
@@ -153,6 +170,7 @@ public sealed class MainForm : Form
             .ToList();
 
         var src = _result.Project.RootDir;
+        var libs = _result.Project.LibraryDirs.ToList();
         SetBusy(true, "Temizleniyor...");
         try
         {
@@ -160,7 +178,7 @@ public sealed class MainForm : Form
             var progress = new Progress<string>(s => _status.Text = s);
             var final = await Task.Run(() =>
             {
-                var r = CleanupAnalyzer.Analyze(VbProject.Load(src), options);
+                var r = CleanupAnalyzer.Analyze(VbProject.Load(src, libs), options);
                 CleanupWriter.Write(r, target, progress);
                 return r;
             });
@@ -171,7 +189,7 @@ public sealed class MainForm : Form
                       + $"Silinen kullanılmayan prosedür: {final.Files.Sum(f => f.DeadCodeProcs.Count)}\n"
                       + $"Silinen kod ifadesi: {final.Files.Sum(f => f.RemovedUnits.Count)}\n\n"
                       + $"Rapor: {CleanupWriter.ReportFileName}"
-                      + (outside > 0 ? $"\n\nDikkat: {outside} dosya proje klasörü dışında olduğu için kopyalanmadı (raporda listelendi)." : "")
+                      + (outside > 0 ? $"\n\nDikkat: {outside} dosya proje ve lib klasörlerinin dışında olduğu için kopyalanmadı (raporda listelendi)." : "")
                       + "\n\nHedef klasör açılsın mı?";
             if (MessageBox.Show(this, msg, Text, MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
                 Process.Start(new ProcessStartInfo("explorer.exe", $"\"{target}\"") { UseShellExecute = true });

@@ -7,20 +7,28 @@ public static class CleanupWriter
 {
     public const string ReportFileName = "VbScreenCleaner_Rapor.txt";
 
-    /// <summary>Copies the project to <paramref name="targetDir"/> and writes the cleaned files there.</summary>
+    /// <summary>Copies the project (and its library folders) to <paramref name="targetDir"/> and writes the cleaned files there.</summary>
     public static void Write(AnalysisResult result, string targetDir, IProgress<string>? progress = null)
     {
-        var source = result.Project.RootDir;
-        var target = Path.GetFullPath(targetDir).TrimEnd(Path.DirectorySeparatorChar);
+        var project = result.Project;
+        var target = VbProject.NormalizeDir(targetDir);
 
-        if (target.Equals(source, StringComparison.OrdinalIgnoreCase)
-            || target.StartsWith(source + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("Hedef klasör kaynak proje klasörünün içinde olamaz.");
+        foreach (var root in project.AllRoots)
+            if (target.Equals(root, StringComparison.OrdinalIgnoreCase) || VbProject.IsUnder(target, root))
+                throw new InvalidOperationException($"Hedef klasör kaynak klasörlerin içinde olamaz: {root}");
         if (Directory.Exists(target) && Directory.EnumerateFileSystemEntries(target).Any())
             throw new InvalidOperationException("Hedef klasör boş olmalı.");
 
-        progress?.Report("Proje kopyalanıyor...");
-        CopyDirectory(source, target);
+        var folders = OutputFolders(project, target, out bool keepsLayout);
+        if (!keepsLayout)
+            result.Warnings.Add("Proje ve lib klasörleri farklı sürücülerde; hedefte yan yana kopyalandı. "
+                                + ".vbp içindeki göreli yollar (..\\lib\\...) bu düzende çalışmayabilir.");
+
+        foreach (var (root, dest) in folders)
+        {
+            progress?.Report($"Kopyalanıyor: {root}");
+            CopyDirectory(root, dest);
+        }
 
         foreach (var fr in result.Files.Where(f => f.HasChanges && f.File.IsInsideRoot))
         {
@@ -32,11 +40,45 @@ public static class CleanupWriter
                 sb.Append(lines[i]);
                 if (i < lines.Count - 1 || fr.File.EndsWithNewLine) sb.Append(fr.File.NewLine);
             }
-            File.WriteAllText(Path.Combine(target, fr.File.RelativePath!), sb.ToString(), VbProject.FileEncoding);
+            File.WriteAllText(OutputPath(folders, fr.File.FullPath), sb.ToString(), VbProject.FileEncoding);
         }
 
         File.WriteAllText(Path.Combine(target, ReportFileName), CleanupReport.Build(result), Encoding.UTF8);
         progress?.Report("Tamamlandı.");
+    }
+
+    /// <summary>
+    /// Where each source folder goes. The folders keep their positions relative to their common parent,
+    /// so "..\lib\x.bas" in the .vbp still points at the copied lib: D:\P\frm + D:\P\lib → target\frm + target\lib.
+    /// With only the project folder its contents go straight into the target, as before.
+    /// </summary>
+    public static IReadOnlyDictionary<string, string> OutputFolders(VbProject project, string target, out bool keepsLayout)
+    {
+        var roots = project.AllRoots.ToList();
+        var common = CommonParent(roots);
+        keepsLayout = common != null;
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var root in roots)
+            map[root] = common == null ? Path.Combine(target, Path.GetFileName(root))
+                : root.Equals(common, StringComparison.OrdinalIgnoreCase) ? target
+                : Path.Combine(target, Path.GetRelativePath(common, root));
+        return map;
+    }
+
+    static string OutputPath(IReadOnlyDictionary<string, string> folders, string sourceFile)
+    {
+        var root = folders.Keys.Where(r => VbProject.IsUnder(sourceFile, r)).MaxBy(r => r.Length)!;
+        return Path.Combine(folders[root], Path.GetRelativePath(root, sourceFile));
+    }
+
+    static string? CommonParent(List<string> dirs)
+    {
+        var parts = dirs.Select(d => d.Split(Path.DirectorySeparatorChar)).ToList();
+        int n = 0;
+        while (parts.All(p => p.Length > n && p[n].Equals(parts[0][n], StringComparison.OrdinalIgnoreCase))) n++;
+        if (n == 0) return null; // different drives
+        var common = string.Join(Path.DirectorySeparatorChar, parts[0].Take(n));
+        return common.EndsWith(':') ? common + Path.DirectorySeparatorChar : common;
     }
 
     static void CopyDirectory(string source, string target)
@@ -153,6 +195,9 @@ public static class CleanupReport
         var sb = new StringBuilder();
         sb.AppendLine("VB Screen Cleaner raporu");
         sb.AppendLine($"Kaynak: {r.Project.RootDir}");
+        foreach (var lib in r.Project.LibraryDirs) sb.AppendLine($"Lib klasörü: {lib}");
+        if (r.Project.LibraryDirs.Count > 0)
+            sb.AppendLine($"Lib klasörü de temizlendi: {(r.Options.CleanLibraries ? "Evet" : "Hayır (salt okunur, olduğu gibi kopyalandı)")}");
         sb.AppendLine($"Tarih: {DateTime.Now:yyyy-MM-dd HH:mm}");
         sb.AppendLine($"Form_Load içinde gizlenenler dahil: {(r.Options.IncludeHiddenInFormLoad ? "Evet" : "Hayır")}");
         sb.AppendLine($"Controls koleksiyonu kullanan formlar atlandı: {(r.Options.SkipFormsUsingControlsCollection ? "Evet" : "Hayır")}");

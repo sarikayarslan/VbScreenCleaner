@@ -5,8 +5,13 @@ public enum VbFileKind { Form, UserControl, PropertyPage, UserDocument, Designer
 public sealed class VbSourceFile
 {
     public required string FullPath { get; init; }
-    /// <summary>Path relative to the project root; null when the file lives outside the root.</summary>
+    /// <summary>
+    /// Display path: relative to the project folder, or "lib\x.bas" for a library file;
+    /// null when the file lives outside the project and library folders.
+    /// </summary>
     public required string? RelativePath { get; init; }
+    /// <summary>Lives in one of the library folders given next to the project folder.</summary>
+    public bool IsLibrary { get; init; }
     public required VbFileKind Kind { get; init; }
     public required List<string> Lines { get; init; }
     public string NewLine { get; init; } = "\r\n";

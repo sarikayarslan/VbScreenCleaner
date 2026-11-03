@@ -1,28 +1,41 @@
 ﻿using VbScreenCleaner.Core;
 
 // Usage:
-//   VbScreenCleaner.Cli analyze <projectDir> [--no-load-hidden] [--no-skip-controls] [--no-dead-code]
-//   VbScreenCleaner.Cli clean   <projectDir> <targetDir> [--no-load-hidden] [--no-skip-controls] [--no-dead-code]
-if (args.Length < 2 || (args[0] == "clean" && args.Length < 3))
+//   VbScreenCleaner.Cli analyze <projectDir>             [--lib <dir>]... [options]
+//   VbScreenCleaner.Cli clean   <projectDir> <targetDir> [--lib <dir>]... [options]
+// Options: --clean-lib --no-load-hidden --no-skip-controls --no-dead-code
+var positional = new List<string>();
+var libs = new List<string>();
+var flags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+for (int i = 0; i < args.Length; i++)
 {
-    Console.WriteLine("Kullanım: analyze <proje klasörü> | clean <proje klasörü> <hedef klasör>  [--no-load-hidden] [--no-skip-controls] [--no-dead-code]");
+    if (args[i].Equals("--lib", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length) libs.Add(args[++i]);
+    else if (args[i].StartsWith("--")) flags.Add(args[i]);
+    else positional.Add(args[i]);
+}
+
+if (positional.Count < 2 || (positional[0] == "clean" && positional.Count < 3))
+{
+    Console.WriteLine("Kullanım: analyze <proje klasörü> | clean <proje klasörü> <hedef klasör>");
+    Console.WriteLine("  [--lib <lib klasörü>]... [--clean-lib] [--no-load-hidden] [--no-skip-controls] [--no-dead-code]");
     return 1;
 }
 
 var options = new CleanupOptions
 {
-    IncludeHiddenInFormLoad = !args.Contains("--no-load-hidden"),
-    SkipFormsUsingControlsCollection = !args.Contains("--no-skip-controls"),
-    RemoveDeadCode = !args.Contains("--no-dead-code"),
+    IncludeHiddenInFormLoad = !flags.Contains("--no-load-hidden"),
+    SkipFormsUsingControlsCollection = !flags.Contains("--no-skip-controls"),
+    RemoveDeadCode = !flags.Contains("--no-dead-code"),
+    CleanLibraries = flags.Contains("--clean-lib"),
 };
 
-var project = VbProject.Load(args[1]);
+var project = VbProject.Load(positional[1], libs);
 var result = CleanupAnalyzer.Analyze(project, options);
 
-if (args[0] == "clean")
+if (positional[0] == "clean")
 {
-    CleanupWriter.Write(result, args[2], new Progress<string>(Console.WriteLine));
-    Console.WriteLine($"Rapor: {Path.Combine(args[2], CleanupWriter.ReportFileName)}");
+    CleanupWriter.Write(result, positional[2], new Progress<string>(Console.WriteLine));
+    Console.WriteLine($"Rapor: {Path.Combine(positional[2], CleanupWriter.ReportFileName)}");
 }
 else
 {

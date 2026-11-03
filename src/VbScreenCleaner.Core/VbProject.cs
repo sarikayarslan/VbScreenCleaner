@@ -21,16 +21,28 @@ public sealed class VbProject
     };
 
     public required string RootDir { get; init; }
+    /// <summary>Extra folders with shared code (e.g. ..\lib) the project's .vbp files point into.</summary>
+    public List<string> LibraryDirs { get; } = new();
     public List<string> ProjectFiles { get; } = new();
     public List<VbSourceFile> Files { get; } = new();
     public List<string> Warnings { get; } = new();
 
-    public static VbProject Load(string rootDir)
+    /// <summary>Project folder followed by library folders that are not inside it.</summary>
+    public IEnumerable<string> AllRoots => LibraryDirs.Where(l => !IsUnder(l, RootDir)).Prepend(RootDir);
+
+    public static VbProject Load(string rootDir, IEnumerable<string>? libraryDirs = null)
     {
-        var root = Path.GetFullPath(rootDir).TrimEnd(Path.DirectorySeparatorChar);
-        if (!Directory.Exists(root)) throw new DirectoryNotFoundException(root);
+        var root = NormalizeDir(rootDir);
+        if (!Directory.Exists(root)) throw new DirectoryNotFoundException($"Proje klasörü bulunamadı: {root}");
 
         var project = new VbProject { RootDir = root };
+        foreach (var lib in (libraryDirs ?? Enumerable.Empty<string>()).Where(l => !string.IsNullOrWhiteSpace(l)).Select(NormalizeDir))
+        {
+            if (!Directory.Exists(lib)) throw new DirectoryNotFoundException($"Lib klasörü bulunamadı: {lib}");
+            if (!lib.Equals(root, StringComparison.OrdinalIgnoreCase) && !project.LibraryDirs.Contains(lib, StringComparer.OrdinalIgnoreCase))
+                project.LibraryDirs.Add(lib);
+        }
+
         var paths = new List<string>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -43,9 +55,10 @@ public sealed class VbProject
 
         if (project.ProjectFiles.Count == 0)
         {
-            project.Warnings.Add("Hiç .vbp bulunamadı; klasördeki tüm VB dosyaları işleniyor.");
-            foreach (var p in Directory.EnumerateFiles(root, "*.*", SearchOption.AllDirectories))
-                if (KindByExtension.ContainsKey(Path.GetExtension(p)) && seen.Add(p)) paths.Add(p);
+            project.Warnings.Add("Hiç .vbp bulunamadı; klasördeki (ve lib klasörlerindeki) tüm VB dosyaları işleniyor.");
+            foreach (var dir in project.AllRoots)
+                foreach (var p in Directory.EnumerateFiles(dir, "*.*", SearchOption.AllDirectories))
+                    if (KindByExtension.ContainsKey(Path.GetExtension(p)) && seen.Add(p)) paths.Add(p);
         }
 
         foreach (var path in paths)
@@ -55,9 +68,11 @@ public sealed class VbProject
                 project.Warnings.Add($"Projede tanımlı dosya bulunamadı: {path}");
                 continue;
             }
-            var file = LoadFile(path, root);
+            var file = LoadFile(path, root, project.LibraryDirs);
             if (!file.IsInsideRoot)
-                project.Warnings.Add($"Dosya proje klasörünün dışında, yalnızca okunacak ve hedefe kopyalanmayacak: {path}");
+                project.Warnings.Add(project.LibraryDirs.Count == 0
+                    ? $"Dosya proje klasörünün dışında, yalnızca okunacak ve hedefe kopyalanmayacak: {path} (bu bir lib klasörüyse 'Lib klasörü' olarak verin)"
+                    : $"Dosya proje ve lib klasörlerinin dışında, yalnızca okunacak ve hedefe kopyalanmayacak: {path}");
             project.Files.Add(file);
         }
 
@@ -92,7 +107,7 @@ public sealed class VbProject
         }
     }
 
-    public static VbSourceFile LoadFile(string path, string root)
+    public static VbSourceFile LoadFile(string path, string root, IReadOnlyList<string>? libraryDirs = null)
     {
         var text = File.ReadAllText(path, FileEncoding);
         string newLine = text.Contains("\r\n") ? "\r\n" : "\n";
@@ -101,20 +116,28 @@ public sealed class VbProject
         if (endsWithNewLine) lines.RemoveAt(lines.Count - 1);
 
         var full = Path.GetFullPath(path);
-        string? relative = full.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-            ? full[(root.Length + 1)..]
-            : null;
+        // The most specific folder wins, so a lib folder inside the project folder still counts as lib.
+        var lib = (libraryDirs ?? Array.Empty<string>()).Where(l => IsUnder(full, l)).MaxBy(l => l.Length);
+        string? relative = lib != null && (!IsUnder(full, root) || lib.Length > root.Length)
+            ? Path.Combine(Path.GetFileName(lib), Path.GetRelativePath(lib, full))
+            : IsUnder(full, root) ? Path.GetRelativePath(root, full) : null;
 
         return new VbSourceFile
         {
             FullPath = full,
             RelativePath = relative,
+            IsLibrary = lib != null && relative != null && (!IsUnder(full, root) || lib.Length > root.Length),
             Kind = KindByExtension[Path.GetExtension(path)],
             Lines = lines,
             NewLine = newLine,
             EndsWithNewLine = endsWithNewLine,
         };
     }
+
+    public static string NormalizeDir(string dir) => Path.GetFullPath(dir.Trim().Trim('"')).TrimEnd(Path.DirectorySeparatorChar);
+
+    public static bool IsUnder(string path, string dir) =>
+        path.StartsWith(dir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
 }
 
 public static class VbParser

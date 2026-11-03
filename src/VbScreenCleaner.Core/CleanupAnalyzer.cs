@@ -14,6 +14,12 @@ public sealed class CleanupOptions
     /// </summary>
     public bool RemoveDeadCode { get; set; } = true;
 
+    /// <summary>
+    /// Also clean files in the library folders (their forms and the statements that touch removed
+    /// controls). Off: library files are only read and copied unchanged, as other projects may share them.
+    /// </summary>
+    public bool CleanLibraries { get; set; }
+
     /// <summary>Group keys (<see cref="ControlGroup.Key"/>) the user chose to keep.</summary>
     public HashSet<string> ForcedKeep { get; } = new(StringComparer.OrdinalIgnoreCase);
 }
@@ -218,7 +224,7 @@ public sealed class CleanupAnalyzer
             }
         }
 
-        if (removable != null && f.IsInsideRoot)
+        if (removable != null && Editable(f))
         {
             // Deleting the statement would also skip the call, so the line has to stay.
             var call = Enumerable.Range(s, e - s)
@@ -264,6 +270,9 @@ public sealed class CleanupAnalyzer
     }
 
     static string Snip(string s) => s.Length <= 90 ? s : s[..87] + "...";
+
+    /// <summary>Files the cleanup may change: the project's own files, and library files when asked to.</summary>
+    bool Editable(VbSourceFile f) => f.IsInsideRoot && (!f.IsLibrary || _options.CleanLibraries);
 
     /// <summary>Resolves the identifier at <paramref name="i"/> to the control groups it may refer to.</summary>
     IReadOnlyList<ControlGroup>? ResolveRef(VbSourceFile f, List<Token> toks, int s, int i, out bool ambiguous)
@@ -398,6 +407,7 @@ public sealed class CleanupAnalyzer
             {
                 g.StaticReasons.Clear();
                 if (!f.IsInsideRoot) g.StaticReasons.Add("Dosya proje klasörünün dışında");
+                else if (!Editable(f)) g.StaticReasons.Add("Lib klasöründeki dosya (salt okunur; 'Lib klasörünü de temizle' kapalı)");
                 else if (!f.CanRemoveControls) g.StaticReasons.Add("Bu dosya türünde kontrol silinmiyor");
                 if (controlsUsed) g.StaticReasons.Add("Form kodu Controls koleksiyonunu kullanıyor (dinamik erişim olabilir)");
 
@@ -540,7 +550,7 @@ public sealed class CleanupAnalyzer
     /// <summary>Procedures that can run without being called from project code.</summary>
     static bool IsEntryPoint(ProcInfo p)
     {
-        if (!p.File.IsInsideRoot) return true;                // shared file: other projects may call it
+        if (!p.File.IsInsideRoot || p.File.IsLibrary) return true; // shared code: other projects may call it
         if (p.Name.Contains('_')) return true;                // events: Form_Load, cmd_Click, WithEvents, Implements
         if (p.File.Kind == VbFileKind.Module) return p.Name.Equals("Main", StringComparison.OrdinalIgnoreCase);
         if (p.File.Kind is VbFileKind.Class or VbFileKind.UserControl or VbFileKind.PropertyPage
@@ -555,7 +565,7 @@ public sealed class CleanupAnalyzer
     HashSet<ProcInfo> ProcsToDelete(HashSet<ControlGroup> removed, HashSet<ProcInfo> dead)
     {
         var delete = removed.SelectMany(g => g.Handlers).ToHashSet();
-        foreach (var p in dead.Where(p => p.File.IsInsideRoot && p.EndLine >= 0))
+        foreach (var p in dead.Where(p => Editable(p.File) && p.EndLine >= 0))
             if (p.Units.Any(u => u.BlockRefs.Any(r => removed.Contains(r.Group))
                                  || (u.Target != null && u.Target.Groups.Any(removed.Contains))
                                  || u.VisEffects.Any(v => removed.Contains(v.Group))))
@@ -565,7 +575,7 @@ public sealed class CleanupAnalyzer
         while (changed)
         {
             changed = false;
-            foreach (var p in dead.Where(p => !delete.Contains(p) && p.File.IsInsideRoot && p.EndLine >= 0))
+            foreach (var p in dead.Where(p => !delete.Contains(p) && Editable(p.File) && p.EndLine >= 0))
                 if (_procRefs.TryGetValue(p, out var names)
                     && names.Any(n => ResolveProc(n, p.File).Any(q => q != p && delete.Contains(q))))
                     changed = delete.Add(p) || changed;

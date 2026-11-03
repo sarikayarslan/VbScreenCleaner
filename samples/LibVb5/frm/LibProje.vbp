@@ -1,0 +1,8 @@
+Type=Exe
+Form=frmAna.frm
+Form=..\lib\frmArama.frm
+Module=modOrtak; ..\lib\modOrtak.bas
+Class=clsLog; ..\lib\clsLog.cls
+Startup="frmAna"
+Command32=""
+Name="LibProje"

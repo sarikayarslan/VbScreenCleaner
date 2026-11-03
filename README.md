@@ -39,15 +39,16 @@ VB Screen Cleaner tüm projeyi tarar, bu kontrollerden **gerçekten hiç görün
 ## Hızlı başlangıç (pencereli uygulama)
 
 1. `VbScreenCleaner.exe`'yi aç.
-2. **Kaynak proje klasörü**: `.vbp` dosyanın bulunduğu klasörü seç. (Alt klasörlerdeki tüm `.vbp`'ler de okunur.)
-3. **Hedef klasör**: boş ya da var olmayan bir klasör. Boş bırakırsan `<proje>_Temiz` önerilir.
-4. **Analiz Et**'e bas.
-5. Soldaki ağaçta her form için:
+2. **Kaynak proje (frm) klasörü**: `.vbp` dosyanın bulunduğu klasörü seç. (Alt klasörlerdeki tüm `.vbp`'ler de okunur.)
+3. **Lib klasörü** (isteğe bağlı): ortak kodun durduğu klasör, ör. `.vbp`'nin `..\lib\Ortak.bas` diye gösterdiği `lib`. Birden fazlaysa `;` ile ayır ya da **Ekle...** ile tek tek ekle. Ayrıntı: [Lib klasörü](#lib-klasörü).
+4. **Hedef klasör**: boş ya da var olmayan bir klasör. Boş bırakırsan `<proje>_Temiz` önerilir.
+5. **Analiz Et**'e bas.
+6. Soldaki ağaçta her form için:
    - ☑ **işaretli satırlar** silinecek kontrollerdir. Silinmesini istemediğin kontrolün işaretini kaldır (içindekilerle birlikte korunur).
    - **Gri `KORUNUYOR:` satırları** gizli ama kullanıldığı için korunan kontrollerdir; neden korunduğu yazar.
    - Bir satıra tıklayınca sağda ayrıntılar görünür: hangi alt kontroller, hangi olay prosedürleri silinecek, tasarım özellikleri, koruma nedenleri.
-6. **Temizle ve Kaydet**'e bas. Temiz proje hedef klasöre yazılır, yanında `VbScreenCleaner_Rapor.txt` oluşur.
-7. Temizlenen projeyi **VB5 IDE'de açıp derle** ve raporu gözden geçir.
+7. **Temizle ve Kaydet**'e bas. Temiz proje hedef klasöre yazılır, yanında `VbScreenCleaner_Rapor.txt` oluşur.
+8. Temizlenen projeyi **VB5 IDE'de açıp derle** ve raporu gözden geçir.
 
 ### Seçenekler
 
@@ -55,6 +56,7 @@ VB Screen Cleaner tüm projeyi tarar, bu kontrollerden **gerçekten hiç görün
 |---|---|---|
 | Form_Load içinde koşulsuz gizlenen kontrolleri de temizle | Açık | Tasarımda görünür olup `Form_Load` içinde hiçbir koşula bağlı olmadan `Visible = False` yapılan kontrolleri de siler. Kapatırsan yalnızca tasarımda `Visible = False` olanlar değerlendirilir. |
 | Controls koleksiyonu kullanan formlara dokunma | Açık | Kodu `Me.Controls(...)` veya `For Each c In Controls` kullanan formlarda hiçbir şey silinmez, çünkü bu formlarda kontrollere çalışma anında üretilen adlarla erişilebilir. **Açık bırakılması önerilir.** |
+| Lib klasörünü de temizle | Kapalı | Kapalıyken lib yalnızca okunur ve olduğu gibi kopyalanır. Açıkken lib'deki formlar ve lib kodundaki gereksiz satırlar da temizlenir. Yalnızca lib'i **sadece bu proje** kullanıyorsa açın. |
 | Hiç çağrılmayan prosedürleri ölü kod say | Açık | Hiçbir yerden çağrılmayan prosedürlerdeki kod kontrolleri korumaz. Böyle bir prosedür silinen bir kontrolü kullanıyorsa prosedür de silinir (bkz. [Ölü kod](#ölü-kod-hiç-çağrılmayan-prosedürler)). |
 
 ---
@@ -64,11 +66,17 @@ VB Screen Cleaner tüm projeyi tarar, bu kontrollerden **gerçekten hiç görün
 ```bat
 VbScreenCleaner.Cli.exe analyze "D:\Projeler\EskiProje"
 VbScreenCleaner.Cli.exe clean   "D:\Projeler\EskiProje" "D:\Projeler\EskiProje_Temiz"
+VbScreenCleaner.Cli.exe clean   "D:\Projeler\Uygulama\frm" "D:\Temiz" --lib "D:\Projeler\Uygulama\lib"
 ```
 
 - `analyze`: hiçbir dosyaya dokunmaz, raporu ekrana yazar.
 - `clean`: projeyi hedefe kopyalar, temizler, raporu hedefe yazar.
-- Ek bayraklar: `--no-load-hidden` (Form_Load kuralını kapatır), `--no-skip-controls` (Controls koleksiyonu kullanan formları da temizler), `--no-dead-code` (ölü kod analizini kapatır).
+- Ek bayraklar:
+  - `--lib <klasör>` — lib klasörü (birden fazla kez verilebilir)
+  - `--clean-lib` — lib klasörünü de temizler
+  - `--no-load-hidden` — Form_Load kuralını kapatır
+  - `--no-skip-controls` — Controls koleksiyonu kullanan formları da temizler
+  - `--no-dead-code` — ölü kod analizini kapatır
 
 ---
 
@@ -176,11 +184,40 @@ Her kontrol kendi formuna bağlı tutulur; arama metin olarak yapılmaz:
 
 ---
 
+## Lib klasörü
+
+Projen şöyle duruyorsa:
+
+```
+D:\Projeler\Uygulama\
+  frm\   Uygulama.vbp, frmAna.frm ...       ← Kaynak proje (frm) klasörü
+  lib\   Ortak.bas, frmArama.frm, Log.cls   ← Lib klasörü  (.vbp: Module=Ortak; ..\lib\Ortak.bas)
+```
+
+lib klasörünü ayrıca ver. Böylece:
+
+- lib dosyaları "proje dışı" sayılmaz; taranır ve hedefe **kopyalanır**.
+- Hedefte klasör düzeni korunur: `Hedef\frm\...` ve `Hedef\lib\...`. `.vbp` içindeki `..\lib\...` yolları temizlenen projede de çalışır; proje doğrudan açılıp derlenebilir.
+- Rapor `Hedef\VbScreenCleaner_Rapor.txt`'ye yazılır.
+
+**Varsayılan (lib salt okunur)** — lib başka projelerde de kullanılıyor olabilir, bu yüzden:
+
+- lib dosyalarına dokunulmaz, byte byte aynı kopyalanır,
+- lib kodunun kullandığı (okuduğu **veya** değer atadığı) kontroller korunur,
+- lib'deki prosedürler hiçbir zaman ölü kod sayılmaz (başka projeler çağırıyor olabilir),
+- lib'deki formların kontrolleri silinmez.
+
+**"Lib klasörünü de temizle" açıkken** lib, projenin parçası gibi temizlenir: lib'deki formlardan gizli kontroller silinir, lib kodundaki yalnızca silinen kontrollere değer atayan satırlar silinir. lib prosedürleri yine de ölü kod sayılmaz.
+
+Lib klasörü verilmezse eski davranış geçerlidir: lib dosyaları proje dışı sayılır, okunur ama kopyalanmaz; raporda "lib klasörü olarak verin" ipucuyla uyarı çıkar.
+
+Proje ve lib farklı sürücülerdeyse (`C:\` ve `D:\`) hedefte yan yana kopyalanır ve raporda `..\lib` yollarının çalışmayabileceği uyarısı çıkar.
+
 ## Hangi dosyalar taranır?
 
 - Klasör ve alt klasörlerdeki tüm `.vbp` dosyalarında listelenen `.frm`, `.ctl`, `.pag`, `.dob`, `.dsr`, `.bas`, `.cls` dosyaları.
 - Klasörde hiç `.vbp` yoksa klasördeki tüm bu uzantılı dosyalar.
-- `.vbp`'nin klasör dışından kullandığı ortak dosyalar (`..\Ortak\x.bas`) **okunur** ama değiştirilmez ve kopyalanmaz. Bu dosyalardan kullanılan kontroller silinmez. Raporda uyarı olarak listelenir; en iyisi kaynak olarak bu dosyaları da içine alan üst klasörü seçmektir.
+- `.vbp`'nin klasör dışından kullandığı ortak dosyalar (`..\lib\x.bas`): [Lib klasörü](#lib-klasörü) olarak verilirse taranır ve kopyalanır; verilmezse yalnızca **okunur**, değiştirilmez ve kopyalanmaz (raporda uyarı çıkar). Her iki durumda da bu dosyaların kullandığı kontroller silinmez (lib temizleme açık değilse).
 - Kontroller yalnızca `.frm`, `.ctl`, `.pag`, `.dob` dosyalarından silinir.
 
 ### Dosya kodlaması
@@ -242,9 +279,10 @@ src/
     CleanupWriter.cs        Kopyalama, dosyaları yeniden yazma, rapor
   VbScreenCleaner/          WinForms arayüzü
   VbScreenCleaner.Cli/      Komut satırı arayüzü
-tests/VbScreenCleaner.Tests/  xUnit testleri (227 test)
+tests/VbScreenCleaner.Tests/  xUnit testleri (237 test)
 samples/SampleVb5/          Temel senaryoları içeren örnek VB5 projesi
 samples/HardVb5/            Zor senaryolar: SSTab, MDI, UserControl, sınıf, Türkçe (1254) adlar, iki .vbp
+samples/LibVb5/             frm\ + lib\ düzeninde proje (lib klasörü senaryoları)
 build/publish.ps1           Dağıtım betiği
 ```
 
@@ -261,6 +299,8 @@ dotnet test tests\VbScreenCleaner.Tests
   Türkçe karakterli kontrol adları, `If x Then:`, satır numaraları, tek satırlık ve satıra bölünmüş prosedür başlıkları,
   `Forms(0).x` / `Screen.ActiveForm.x` / `With Me`, `#If`, yan etkili fonksiyon çağrıları, `Resize`/`Reposition` olayları,
   modülden başka formun `Controls` döngüsü, aynı adlı kontroller, iki `.vbp`'nin paylaştığı dosyalar ve hiçbir `.vbp`'de olmayan dosya
+- **`samples/LibVb5`** — `frm\` + `lib\` düzeni: lib salt okunurken ve temizlenirken hangi kontrollerin kaldığı, hedefte
+  `frm\` ve `lib\`'in yan yana yazılıp `.vbp` yollarının çalışması, lib'in proje klasörünün içinde olması, hatalı hedef/lib yolları
 - **Rastgele üretilen projeler** — 60 farklı rastgele proje (iç içe frame'ler, `Form_Load` / olay / modül içinde okuma, yazma,
   gösterme, gizleme, koşullu ifadeler; modül yarısında çağrılan, yarısında ölü kod). Aracın kararı, kuralları bağımsız olarak
   uygulayan bir referans hesapla birebir karşılaştırılır
