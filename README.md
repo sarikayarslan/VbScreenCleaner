@@ -4,6 +4,10 @@ VB5/VB6 projelerinde **kontrolü olmayan olay prosedürlerini** bulan Windows ma
 
 Formdan bir kontrol silindiğinde `cmdEski_Click`, `txtAd_Change` gibi prosedürleri kodda kalabilir. Bu araç bu prosedürleri satır numaralarıyla raporlar. Kontrol dizilerinde (Index'li kontroller) de çalışır.
 
+## İndir
+
+**[VbOrphanHandlers.exe](https://github.com/sarikayarslan/VbScreenCleaner/releases/latest/download/VbOrphanHandlers.exe)**: Windows 10/11 x64 için tek dosya. .NET kurulumu gerekmez.
+
 ## Kullanım
 
 1. `VbOrphanHandlers.exe` uygulamasını açın.
