@@ -33,7 +33,19 @@ VbOrphanHandlers.exe "D:\Uygulama\frm" "D:\Uygulama\lib" -o rapor.txt
 
 Raporlanmayanlar: `Form_` / `MDIForm_` / `UserControl_` / `PropertyPage_` / `UserDocument_` olayları, `WithEvents` değişkenlerinin olayları, `Implements` arayüz metotları ve yorum satırları.
 
-- Taranan dosyalar: `.frm`, `.ctl`, `.pag`, `.dob` (tek bir form dosyası da verilebilir). Bir `.vbp` verildiğinde yalnızca projede listelenen formlar taranır.
+## Doğrudan çağrılar
+
+Olay prosedürü normal bir Sub olarak koddan da çağrılabilir. Bu yüzden tüm `.frm`, `.ctl`, `.bas` ve `.cls` dosyalarında çağrılar aranır:
+
+- **Aynı formdan:** `mnuX_Click 15`, `Call mnuX_Click(15)`, `Me.mnuX_Click 15`. Tek satırlık `If ... Then mnuX_Click 15` de tanınır.
+- **Başka formdan / modülden:** `frmAna.mnuX_Click 15`. `Private` prosedürler dışarıdan çağrılamadığı için sayılmaz.
+- **Kontrolü olmayan ama çağrılan prosedür:** 1. bölümde `[ÇAĞRILIYOR, ölü değil: dosya:satır]` olarak işaretlenir.
+- **Sabit index ile çağrı:** Formda olmayan bir index (ör. 15) ile çağrılıyorsa o index ölü dal sayılmaz, "ÇAĞRIYLA kullanılıyor" olarak gösterilir. Bu index'ler `mnuX(Index)` erişimlerinin çalışma zamanı hatası kontrolüne de katılır.
+- **Elle kontrol gerektiren çağrılar:** Değişkenle çağrılar (`mnuX_Click i`), form değişkeni üzerinden çağrılar (`f.mnuX_Click 3`) ve `CallByName(frm, "mnuX_Click", ...)` "Elle kontrol" olarak işaretlenir.
+
+## Notlar
+
+- Taranan dosyalar: `.frm`, `.ctl`, `.pag`, `.dob` (tek bir form dosyası da verilebilir); çağrılar için ayrıca `.bas` ve `.cls`. Bir `.vbp` verildiğinde yalnızca projede listelenen dosyalar (`Form=`, `Module=`, `Class=` ...) taranır. Formlarla modüller ayrı klasördeyse lib klasörünü de ekleyin.
 - Alt çizgi içeren kontrol adları (`cmd_Kaydet_Click`) ve satıra bölünmüş (` _`) prosedür başlıkları desteklenir.
 - Dosyalar Windows-1254 ile **yalnızca okunur**. Projede hiçbir dosya değiştirilmez.
 

@@ -9,6 +9,7 @@ namespace VbOrphanHandlers;
 public static class OrphanScanner
 {
     static readonly string[] FormExts = [".frm", ".ctl", ".pag", ".dob"];
+    static readonly string[] CodeExts = [".frm", ".ctl", ".pag", ".dob", ".bas", ".cls"];
     static readonly string[] SelfPrefixes = ["Form", "MDIForm", "UserControl", "PropertyPage", "UserDocument"];
     static readonly HashSet<string> KnownEvents = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -45,29 +46,37 @@ public static class OrphanScanner
         var enc = VbEncoding;
         var warnings = new List<string>();
         var files = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        var codeFiles = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);   // forms + .bas/.cls, searched for calls
         foreach (var input in inputs)
         {
             if (Directory.Exists(input))
             {
                 foreach (var f in Directory.EnumerateFiles(input, "*.*", SearchOption.AllDirectories))
+                {
                     if (FormExts.Contains(Path.GetExtension(f), StringComparer.OrdinalIgnoreCase)) files.Add(Path.GetFullPath(f));
+                    if (CodeExts.Contains(Path.GetExtension(f), StringComparer.OrdinalIgnoreCase)) codeFiles.Add(Path.GetFullPath(f));
+                }
             }
             else if (File.Exists(input) && input.EndsWith(".vbp", StringComparison.OrdinalIgnoreCase))
             {
                 var baseDir = Path.GetDirectoryName(Path.GetFullPath(input))!;
                 foreach (var line in File.ReadAllLines(input, enc))
                 {
-                    var m = Regex.Match(line, @"^(Form|UserControl|PropertyPage|UserDocument)=(.+)$", RegexOptions.IgnoreCase);
+                    var m = Regex.Match(line, @"^(Form|UserControl|PropertyPage|UserDocument|Module|Class)=(.+)$", RegexOptions.IgnoreCase);
                     if (!m.Success) continue;
                     var rel = m.Groups[2].Value.Trim();
                     if (rel.Contains(';')) rel = rel[(rel.IndexOf(';') + 1)..].Trim();
                     var full = Path.GetFullPath(Path.Combine(baseDir, rel));
-                    if (File.Exists(full)) files.Add(full);
-                    else warnings.Add($".vbp içindeki dosya bulunamadı: {full}");
+                    if (!File.Exists(full)) { warnings.Add($".vbp içindeki dosya bulunamadı: {full}"); continue; }
+                    codeFiles.Add(full);
+                    if (FormExts.Contains(Path.GetExtension(full), StringComparer.OrdinalIgnoreCase)) files.Add(full);
                 }
             }
-            else if (File.Exists(input) && FormExts.Contains(Path.GetExtension(input), StringComparer.OrdinalIgnoreCase))
-                files.Add(Path.GetFullPath(input));
+            else if (File.Exists(input) && CodeExts.Contains(Path.GetExtension(input), StringComparer.OrdinalIgnoreCase))
+            {
+                codeFiles.Add(Path.GetFullPath(input));
+                if (FormExts.Contains(Path.GetExtension(input), StringComparer.OrdinalIgnoreCase)) files.Add(Path.GetFullPath(input));
+            }
             else throw new FileNotFoundException($"Bulunamadı: {input}");
         }
 
@@ -79,13 +88,14 @@ public static class OrphanScanner
         var constAccess = new List<string>();
         int handlerCount = 0;
 
+        var calls = BuildCallIndex(codeFiles, root, enc);
         foreach (var file in files)
-            ScanFile(file, Path.GetRelativePath(root, file), enc, orphans, indexIssues, indexUsage, constAccess, possible, ref handlerCount);
+            ScanFile(file, Path.GetRelativePath(root, file), enc, calls, orphans, indexIssues, indexUsage, constAccess, possible, ref handlerCount);
 
         var report = new StringBuilder();
         report.AppendLine("VB5 Sahipsiz Olay Prosedürleri Raporu");
         report.AppendLine($"Kaynak: {string.Join("; ", inputs)}");
-        report.AppendLine($"Taranan form dosyası: {files.Count}, olay prosedürü: {handlerCount}");
+        report.AppendLine($"Taranan form dosyası: {files.Count}, çağrı aranan dosya (form/modül/sınıf): {codeFiles.Count}, olay prosedürü: {handlerCount}");
         foreach (var w in warnings) report.AppendLine($"Uyarı: {w}");
         report.AppendLine();
         void Section(string title, List<string> items)
@@ -118,9 +128,16 @@ public static class OrphanScanner
     // Compares Index values used in the handler body (Select Case Index [± n] / If Index [± n] = m) with the
     // designer's Index values, and checks array accesses like ctl(Index ± n). Returns report lines or null.
     static string? AnalyzeIndexUsage(List<(int Line, string Text)> logical, int headerAt, string array,
-        Dictionary<string, SortedSet<int>> controls, HashSet<string> dynamicArrays)
+        Dictionary<string, SortedSet<int>> controls, HashSet<string> dynamicArrays, List<CallSite> sure, List<CallSite> maybe)
     {
         var defined = controls[array];
+        // Index values the handler is called with directly (mnuX_Click 15)
+        var calledWith = new SortedDictionary<int, List<CallSite>>();
+        var otherCalls = new List<CallSite>(maybe);
+        foreach (var c in sure)
+            if (int.TryParse(c.FirstArg, out var n)) { if (!calledWith.TryGetValue(n, out var l)) calledWith[n] = l = []; l.Add(c); }
+            else otherCalls.Add(c);
+        var domain = new SortedSet<int>(defined.Concat(calledWith.Keys));   // every Index value the body can see
         var used = new SortedDictionary<int, int>();   // index -> first line
         var manual = new List<string>();
         var risks = new List<string>();
@@ -140,7 +157,7 @@ public static class OrphanScanner
                     var target = a.Groups[1].Value;
                     if (!controls.TryGetValue(target, out var targetIdx) || targetIdx.Count == 0) continue;
                     int off = Offset(a, 2);
-                    var bad = defined.Where(n => !targetIdx.Contains(n + off)).ToList();
+                    var bad = domain.Where(n => !targetIdx.Contains(n + off)).ToList();
                     if (bad.Count == 0) continue;
                     var dyn = dynamicArrays.Contains(target) ? "  (Load ile çalışma zamanında eleman ekleniyor, yüklenmiş olabilir)" : "";
                     risks.Add($"satır {lineNo}: {target}({WithOffset(off)}) -> formda olmayan: {target}({Ranges(bad.Select(n => n + off))}), "
@@ -193,10 +210,14 @@ public static class OrphanScanner
         }
     done:
         // nothing compared: Index used generically, e.g. mnuX(Index).Caption
-        if (used.Count == 0 && manual.Count == 0 && risks.Count == 0) return null;
+        if (used.Count == 0 && manual.Count == 0 && risks.Count == 0 && otherCalls.Count == 0
+            && calledWith.Keys.All(defined.Contains)) return null;
 
         var sb = new StringBuilder();
-        var missing = used.Keys.Where(n => !defined.Contains(n)).ToList();
+        var missing = used.Keys.Where(n => !defined.Contains(n) && !calledWith.ContainsKey(n)).ToList();
+        foreach (var (n, cs) in calledWith.Where(kv => !defined.Contains(kv.Key)))
+            sb.Append($"\r\n    Formda yok ama ÇAĞRIYLA kullanılıyor, ölü değil: index {n} ({Sites(cs)})"
+                + (used.Count > 0 && !used.ContainsKey(n) ? (caseElse ? "  (Case Else'e düşer)" : "  (kodda karşılığı yok)") : ""));
         if (missing.Count > 0)
             sb.Append($"\r\n    Kodda kullanılıp formda OLMAYAN index'ler ({missing.Count}): {Ranges(missing, used)}"
                 + (dynamicArrays.Contains(array) ? "  (Load ile çalışma zamanında eleman ekleniyor, yüklenmiş olabilir)" : ""));
@@ -209,7 +230,91 @@ public static class OrphanScanner
         }
         foreach (var r in risks) sb.Append($"\r\n    Çalışma zamanı hatası riski: {r}");
         foreach (var mline in manual.Distinct()) sb.Append($"\r\n    Elle kontrol: {mline}");
+        foreach (var c in otherCalls)
+            sb.Append($"\r\n    Elle kontrol: {c.Where}: " + (c.ByName ? "CallByName ile çağrılıyor (olası)"
+                : maybe.Contains(c) ? $"olası çağrı, '{c.Qualifier}.' üzerinden (form değişkeni olabilir), index: {(c.FirstArg.Length == 0 ? "yok" : c.FirstArg)}"
+                : c.FirstArg.Length == 0 ? "index'siz çağrılıyor" : $"değişken/ifade ile çağrılıyor ({c.FirstArg})"));
         return sb.Length == 0 ? null : sb.ToString();
+    }
+
+    // A direct call of a procedure: mnuX_Click 15 / Call mnuX_Click(15) / frmAna.mnuX_Click 15 / CallByName(f, "mnuX_Click", ...)
+    record CallSite(string File, string Rel, int Line, string? Qualifier, string FirstArg, bool ByName)
+    {
+        public string Where => $"{Rel}:{Line}";
+    }
+
+    static readonly Regex CallStmtRx = new(@"^\s*(?:Call\s+)?(?:(\w+)\s*\.\s*)?([A-Za-z]\w*_\w+)\b(.*)$", RegexOptions.IgnoreCase);
+    static readonly Regex DeclRx = new(@"^\s*(?:(?:Public|Private|Friend|Global|Static)\s+)*(?:Sub|Function|Property|Declare|Event|End)\b", RegexOptions.IgnoreCase);
+
+    static Dictionary<string, List<CallSite>> BuildCallIndex(IEnumerable<string> codeFiles, string root, Encoding enc)
+    {
+        var calls = new Dictionary<string, List<CallSite>>(StringComparer.OrdinalIgnoreCase);
+        void Add(string proc, CallSite c)
+        {
+            if (!calls.TryGetValue(proc, out var list)) calls[proc] = list = [];
+            list.Add(c);
+        }
+        foreach (var file in codeFiles)
+        {
+            var lines = File.ReadAllLines(file, enc);
+            int start = Array.FindIndex(lines, l => l.StartsWith("Attribute VB_Name", StringComparison.OrdinalIgnoreCase));
+            var rel = Path.GetRelativePath(root, file);
+            foreach (var (lineNo, text) in Logical(lines, Math.Max(start, 0)))
+            {
+                var raw = StripComment(text);
+                foreach (Match b in Regex.Matches(raw, @"\bCallByName\s*\(\s*([^,]+?)\s*,\s*""(\w+)""", RegexOptions.IgnoreCase))
+                    Add(b.Groups[2].Value, new CallSite(file, rel, lineNo, b.Groups[1].Value, "?", true));
+                var code = StripStrings(raw);
+                if (DeclRx.IsMatch(code)) continue;
+                foreach (var stmt in SplitStatements(code))
+                {
+                    // single-line If ... Then call / Else call
+                    var st = Regex.Replace(stmt, @"^\s*(?:(?:ElseIf|If)\b.*?\bThen\b|Else\b)", "", RegexOptions.IgnoreCase);
+                    var m = CallStmtRx.Match(st);
+                    if (!m.Success) continue;
+                    var rest = m.Groups[3].Value;
+                    if (Regex.IsMatch(rest, @"^\s*(=|\.|!)")) continue;   // assignment / member access, not a call
+                    Add(m.Groups[2].Value, new CallSite(file, rel, lineNo, m.Groups[1].Success ? m.Groups[1].Value : null, FirstArg(rest), false));
+                }
+            }
+        }
+        return calls;
+    }
+
+    // first argument of "(a, b)" or " a, b"; "" when there is none
+    static string FirstArg(string rest)
+    {
+        var r = rest.Trim();
+        if (r.StartsWith('(')) r = r[1..];
+        int depth = 0;
+        for (int i = 0; i < r.Length; i++)
+        {
+            if (r[i] == '(') depth++;
+            else if (r[i] == ')' && depth-- == 0) return r[..i].Trim();
+            else if (r[i] == ',' && depth == 0) return r[..i].Trim();
+        }
+        return r.Trim();
+    }
+
+    // joins line continuations, keeps the first physical line number
+    static List<(int Line, string Text)> Logical(string[] lines, int start)
+    {
+        var logical = new List<(int Line, string Text)>();
+        for (int i = start; i < lines.Length; i++)
+        {
+            int first = i;
+            var text = lines[i];
+            while (Regex.IsMatch(text, @"\s_\s*$") && i + 1 < lines.Length)
+                text = Regex.Replace(text, @"\s_\s*$", " ") + lines[++i].TrimStart();
+            logical.Add((first + 1, text));
+        }
+        return logical;
+    }
+
+    static string Sites(IEnumerable<CallSite> sites)
+    {
+        var list = sites.Select(c => c.Where).Distinct().ToList();
+        return string.Join(", ", list.Take(5)) + (list.Count > 5 ? $" ... (+{list.Count - 5})" : "");
     }
 
     static string StripStrings(string s) => Regex.Replace(s, "\"[^\"]*\"", "\"\"");
@@ -254,7 +359,7 @@ public static class OrphanScanner
         yield return line[start..];
     }
 
-    static void ScanFile(string file, string rel, Encoding enc, List<string> orphans, List<string> indexIssues,
+    static void ScanFile(string file, string rel, Encoding enc, Dictionary<string, List<CallSite>> calls, List<string> orphans, List<string> indexIssues,
         List<string> indexUsage, List<string> constAccess, List<string> possible, ref int handlerCount)
     {
         var lines = File.ReadAllLines(file, enc);
@@ -290,15 +395,28 @@ public static class OrphanScanner
                 controls[stack.Peek()].Add(int.Parse(ix.Groups[1].Value));
         }
 
-        // code: join line continuations, keep the first physical line number
-        var logical = new List<(int Line, string Text)>();
-        for (int i = codeStart; i < lines.Length; i++)
+        var logical = Logical(lines, codeStart);
+        var vbName = lines.Select(l => Regex.Match(l, @"^Attribute\s+VB_Name\s*=\s*""(\w+)""", RegexOptions.IgnoreCase))
+            .FirstOrDefault(x => x.Success)?.Groups[1].Value ?? Path.GetFileNameWithoutExtension(file);
+
+        // direct calls of a procedure of this form: same file (unqualified / Me. / Form.), other files only Form.proc
+        // when the procedure is not Private. Other qualifiers (form instance variables) and CallByName are "possible".
+        (List<CallSite> Sure, List<CallSite> Possible) CallsOf(string proc, bool isPrivate)
         {
-            int start = i;
-            var text = lines[i];
-            while (Regex.IsMatch(text, @"\s_\s*$") && i + 1 < lines.Length)
-                text = Regex.Replace(text, @"\s_\s*$", " ") + lines[++i].TrimStart();
-            logical.Add((start + 1, text));
+            var sure = new List<CallSite>();
+            var maybe = new List<CallSite>();
+            if (!calls.TryGetValue(proc, out var sites)) return (sure, maybe);
+            foreach (var c in sites)
+            {
+                bool same = string.Equals(c.File, file, StringComparison.OrdinalIgnoreCase);
+                bool selfQ = c.Qualifier == null || c.Qualifier.Equals("Me", StringComparison.OrdinalIgnoreCase)
+                    || c.Qualifier.Equals(vbName, StringComparison.OrdinalIgnoreCase);
+                if (c.ByName) { if (same || !isPrivate) maybe.Add(c); }
+                else if (same && selfQ) sure.Add(c);
+                else if (!same && !isPrivate && c.Qualifier != null)
+                    (c.Qualifier.Equals(vbName, StringComparison.OrdinalIgnoreCase) ? sure : maybe).Add(c);
+            }
+            return (sure, maybe);
         }
 
         var withEvents = new List<string>();
@@ -339,6 +457,8 @@ public static class OrphanScanner
             if (implements.Any(x => proc.StartsWith(x + "_", StringComparison.OrdinalIgnoreCase))) continue;
             if (withEvents.Any(x => obj.Equals(x, StringComparison.OrdinalIgnoreCase))) continue;
 
+            bool isPrivate = m.Groups[1].Value.Equals("Private", StringComparison.OrdinalIgnoreCase);
+            var (sure, maybe) = CallsOf(proc, isPrivate);
             bool hasIndex = Regex.IsMatch(m.Groups[3].Value, @"^\s*(ByVal\s+|ByRef\s+)?Index\s+As\s+Integer\b", RegexOptions.IgnoreCase);
             string where = $"{rel}:{lineNo}";
 
@@ -348,7 +468,7 @@ public static class OrphanScanner
                 bool isArray = indices.Count > 0;
                 if (isArray && hasIndex)
                 {
-                    var usage = AnalyzeIndexUsage(logical, li, obj, controls, dynamicArrays);
+                    var usage = AnalyzeIndexUsage(logical, li, obj, controls, dynamicArrays, sure, maybe);
                     if (usage != null) indexUsage.Add($"{where}  {proc}  (formdaki index'ler: {Ranges(indices)})" + usage);
                 }
                 else if (isArray && !hasIndex)
@@ -362,7 +482,9 @@ public static class OrphanScanner
             if (KnownEvents.Contains(evt))
             {
                 handlerCount++;
-                orphans.Add($"{where}  {proc}{arr}  -> formda '{obj}' adlı kontrol yok");
+                var called = sure.Count > 0 ? $"  [ÇAĞRILIYOR, ölü değil: {Sites(sure)}]" : "";
+                if (maybe.Count > 0) called += $"  [olası çağrı, elle kontrol: {Sites(maybe)}]";
+                orphans.Add($"{where}  {proc}{arr}  -> formda '{obj}' adlı kontrol yok{called}");
             }
             else
                 possible.Add($"{where}  {proc}{arr}  -> '{obj}' kontrol değil, '{evt}' bilinen olay adı değil");
