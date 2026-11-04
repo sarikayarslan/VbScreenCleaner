@@ -66,6 +66,8 @@ public static class OrphanScanner
                     else warnings.Add($".vbp içindeki dosya bulunamadı: {full}");
                 }
             }
+            else if (File.Exists(input) && FormExts.Contains(Path.GetExtension(input), StringComparer.OrdinalIgnoreCase))
+                files.Add(Path.GetFullPath(input));
             else throw new FileNotFoundException($"Bulunamadı: {input}");
         }
 
@@ -74,10 +76,11 @@ public static class OrphanScanner
         var possible = new List<string>();
         var indexIssues = new List<string>();
         var indexUsage = new List<string>();
+        var constAccess = new List<string>();
         int handlerCount = 0;
 
         foreach (var file in files)
-            ScanFile(file, Path.GetRelativePath(root, file), enc, orphans, indexIssues, indexUsage, possible, ref handlerCount);
+            ScanFile(file, Path.GetRelativePath(root, file), enc, orphans, indexIssues, indexUsage, constAccess, possible, ref handlerCount);
 
         var report = new StringBuilder();
         report.AppendLine("VB5 Sahipsiz Olay Prosedürleri Raporu");
@@ -94,67 +97,109 @@ public static class OrphanScanner
         }
         Section("1. Kontrolü olmayan olay prosedürleri", orphans);
         Section("2. Index uyuşmazlıkları (kontrol dizisi / tekil kontrol)", indexIssues);
-        Section("3. Kontrol dizilerinde index kullanımı (Select Case Index / If Index = n)", indexUsage);
-        Section("4. Kontrol olmayan nesne_Ad prosedürleri (bilinmeyen olay adı, elle kontrol edin)", possible);
+        Section("3. Kontrol dizilerinde index kullanımı (Select Case Index, If Index = n, kontrol(Index ± n))", indexUsage);
+        Section("4. Formda olmayan sabit index erişimleri (ör. mnuX(15))", constAccess);
+        Section("5. Kontrol olmayan nesne_Ad prosedürleri (bilinmeyen olay adı, elle kontrol edin)", possible);
         report.AppendLine("Not: Form_/MDIForm_/UserControl_ olayları, WithEvents değişkenleri ve Implements arayüz metotları raporlanmaz.");
         return report.ToString();
     }
 
-    // Compares Index values used in the handler body (Select Case Index / If Index = n) with the
-    // designer's Index values. Returns report lines, or null when there is nothing to report.
-    static string? AnalyzeIndexUsage(List<(int Line, string Text)> logical, int headerAt, SortedSet<int> defined)
+    const string IndexOffset = @"(?<![.\w])Index\s*(?:([+-])\s*(\d+))?";
+    static readonly Regex IndexAccessRx = new(@"(?<![.\w])(\w+)\s*\(\s*" + IndexOffset + @"\s*\)", RegexOptions.IgnoreCase);
+    static readonly Regex AnyAccessWithIndexRx = new(@"(?<![.\w])(\w+)\s*\(([^()]*(?<![.\w])Index\b[^()]*)\)", RegexOptions.IgnoreCase);
+    static readonly Regex AnyCallRx = new(@"\w+\s*\([^()]*\)");
+    static readonly Regex BareIndexRx = new(@"(?<![.\w])Index\b", RegexOptions.IgnoreCase);
+
+    static int Offset(Match m, int signGroup) =>
+        m.Groups[signGroup].Success ? (m.Groups[signGroup].Value == "-" ? -1 : 1) * int.Parse(m.Groups[signGroup + 1].Value) : 0;
+
+    static string WithOffset(int off) => off == 0 ? "Index" : off > 0 ? $"Index + {off}" : $"Index - {-off}";
+
+    // Compares Index values used in the handler body (Select Case Index [± n] / If Index [± n] = m) with the
+    // designer's Index values, and checks array accesses like ctl(Index ± n). Returns report lines or null.
+    static string? AnalyzeIndexUsage(List<(int Line, string Text)> logical, int headerAt, string array,
+        Dictionary<string, SortedSet<int>> controls, HashSet<string> dynamicArrays)
     {
+        var defined = controls[array];
         var used = new SortedDictionary<int, int>();   // index -> first line
         var manual = new List<string>();
-        var selectStack = new Stack<bool>();           // true = Select Case Index
+        var risks = new List<string>();
+        var selectStack = new Stack<int?>();           // Index offset of Select Case Index ± n; null = other select
         bool caseElse = false;
         for (int i = headerAt + 1; i < logical.Count; i++)
         {
             var (lineNo, raw) = logical[i];
             foreach (var stmt in SplitStatements(StripComment(raw)))
             {
-                var s = stmt.Trim();
+                var s = StripStrings(stmt).Trim();
                 if (Regex.IsMatch(s, @"^End\s+Sub\b", RegexOptions.IgnoreCase)) goto done;
-                if (Regex.IsMatch(s, @"^Select\s+Case\s", RegexOptions.IgnoreCase))
+
+                // array accesses: ctl(Index ± n)
+                foreach (Match a in IndexAccessRx.Matches(s))
                 {
-                    selectStack.Push(Regex.IsMatch(s, @"^Select\s+Case\s+Index\s*$", RegexOptions.IgnoreCase));
+                    var target = a.Groups[1].Value;
+                    if (!controls.TryGetValue(target, out var targetIdx) || targetIdx.Count == 0) continue;
+                    int off = Offset(a, 2);
+                    var bad = defined.Where(n => !targetIdx.Contains(n + off)).ToList();
+                    if (bad.Count == 0) continue;
+                    var dyn = dynamicArrays.Contains(target) ? "  (Load ile çalışma zamanında eleman ekleniyor, yüklenmiş olabilir)" : "";
+                    risks.Add($"satır {lineNo}: {target}({WithOffset(off)}) -> formda olmayan: {target}({Ranges(bad.Select(n => n + off))}), "
+                        + $"index {Ranges(bad)} için{dyn}");
+                }
+                foreach (Match a in AnyAccessWithIndexRx.Matches(s))
+                    if (controls.TryGetValue(a.Groups[1].Value, out var t) && t.Count > 0 && !IndexAccessRx.IsMatch(a.Value))
+                        manual.Add($"satır {lineNo}: {a.Value}");
+
+                var sel = Regex.Match(s, @"^Select\s+Case\s+(.+)$", RegexOptions.IgnoreCase);
+                if (sel.Success)
+                {
+                    var expr = sel.Groups[1].Value.Trim();
+                    var plain = Regex.Match(expr, "^" + IndexOffset + @"$", RegexOptions.IgnoreCase);
+                    if (plain.Success) selectStack.Push(Offset(plain, 1));
+                    else
+                    {
+                        if (BareIndexRx.IsMatch(AnyCallRx.Replace(expr, ""))) manual.Add($"satır {lineNo}: {s}");
+                        selectStack.Push(null);
+                    }
                     continue;
                 }
                 if (Regex.IsMatch(s, @"^End\s+Select\b", RegexOptions.IgnoreCase)) { if (selectStack.Count > 0) selectStack.Pop(); continue; }
                 var c = Regex.Match(s, @"^Case\s+(.+)$", RegexOptions.IgnoreCase);
-                if (c.Success && selectStack.Count > 0 && selectStack.Peek())
+                if (c.Success && selectStack.Count > 0 && selectStack.Peek() is int selOff)
                 {
                     if (Regex.IsMatch(c.Groups[1].Value, @"^Else\b", RegexOptions.IgnoreCase)) { caseElse = true; continue; }
                     foreach (var item in c.Groups[1].Value.Split(','))
                     {
                         var it = item.Trim();
                         var r = Regex.Match(it, @"^(-?\d+)\s+To\s+(-?\d+)$", RegexOptions.IgnoreCase);
-                        if (Regex.IsMatch(it, @"^-?\d+$")) used.TryAdd(int.Parse(it), lineNo);
+                        if (Regex.IsMatch(it, @"^-?\d+$")) used.TryAdd(int.Parse(it) - selOff, lineNo);
                         else if (r.Success && int.Parse(r.Groups[2].Value) - int.Parse(r.Groups[1].Value) <= 10000)
-                            for (int n = int.Parse(r.Groups[1].Value); n <= int.Parse(r.Groups[2].Value); n++) used.TryAdd(n, lineNo);
-                        else manual.Add($"satır {lineNo}: Case {it}");
+                            for (int n = int.Parse(r.Groups[1].Value); n <= int.Parse(r.Groups[2].Value); n++) used.TryAdd(n - selOff, lineNo);
+                        else manual.Add($"satır {lineNo}: Case {it}" + (selOff != 0 ? $"  (Select Case {WithOffset(selOff)})" : ""));
                     }
                     continue;
                 }
                 if (Regex.IsMatch(s, @"^(If|ElseIf)\b", RegexOptions.IgnoreCase))
                 {
                     var cond = Regex.Replace(s, @"\bThen\b.*$", "", RegexOptions.IgnoreCase);
-                    // (?<![.\w]) skips obj.Index and ListIndex
-                    foreach (Match e in Regex.Matches(cond, @"(?<![.\w])Index\s*=\s*(-?\d+)\b", RegexOptions.IgnoreCase))
-                        used.TryAdd(int.Parse(e.Groups[1].Value), lineNo);
-                    if (Regex.IsMatch(cond, @"(?<![.\w])Index\s*=\s*(?!-?\d+\b)\S", RegexOptions.IgnoreCase)
-                        || Regex.IsMatch(cond, @"(?<![.\w])Index\s*(<>|<|>|<=|>=)", RegexOptions.IgnoreCase))
-                        manual.Add($"satır {lineNo}: {cond.Trim()}");
+                    // Index [± n] = m  -> index m ∓ n; (?<![.\w]) skips obj.Index and ListIndex
+                    var cmp = new Regex(IndexOffset + @"\s*=\s*(-?\d+)\b(?!\s*[-+*/\^.])", RegexOptions.IgnoreCase);
+                    foreach (Match e in cmp.Matches(cond))
+                        used.TryAdd(int.Parse(e.Groups[3].Value) - Offset(e, 1), lineNo);
+                    var rest = AnyCallRx.Replace(cmp.Replace(cond, ""), "");
+                    if (BareIndexRx.IsMatch(rest)) manual.Add($"satır {lineNo}: {cond.Trim()}");
                 }
             }
         }
     done:
-        if (used.Count == 0 && manual.Count == 0) return null;   // Index used generically, e.g. mnuX(Index).Caption
+        // nothing compared: Index used generically, e.g. mnuX(Index).Caption
+        if (used.Count == 0 && manual.Count == 0 && risks.Count == 0) return null;
 
         var sb = new StringBuilder();
         var missing = used.Keys.Where(n => !defined.Contains(n)).ToList();
         if (missing.Count > 0)
-            sb.Append($"\r\n    Kodda kullanılıp formda OLMAYAN index'ler ({missing.Count}): {Ranges(missing, used)}");
+            sb.Append($"\r\n    Kodda kullanılıp formda OLMAYAN index'ler ({missing.Count}): {Ranges(missing, used)}"
+                + (dynamicArrays.Contains(array) ? "  (Load ile çalışma zamanında eleman ekleniyor, yüklenmiş olabilir)" : ""));
         if (used.Count > 0)
         {
             var unhandled = defined.Where(n => !used.ContainsKey(n)).ToList();
@@ -162,9 +207,12 @@ public static class OrphanScanner
                 sb.Append($"\r\n    Formda olup kodda karşılığı OLMAYAN index'ler ({unhandled.Count}): {Ranges(unhandled)}"
                     + (caseElse ? "  (Case Else'e düşer)" : ""));
         }
-        foreach (var mline in manual) sb.Append($"\r\n    Elle kontrol: {mline}");
+        foreach (var r in risks) sb.Append($"\r\n    Çalışma zamanı hatası riski: {r}");
+        foreach (var mline in manual.Distinct()) sb.Append($"\r\n    Elle kontrol: {mline}");
         return sb.Length == 0 ? null : sb.ToString();
     }
+
+    static string StripStrings(string s) => Regex.Replace(s, "\"[^\"]*\"", "\"\"");
 
     // "0-9, 12, 15-20"; with lines: "10-49 (s.55)"
     static string Ranges(IEnumerable<int> values, IDictionary<int, int>? lines = null)
@@ -207,7 +255,7 @@ public static class OrphanScanner
     }
 
     static void ScanFile(string file, string rel, Encoding enc, List<string> orphans, List<string> indexIssues,
-        List<string> indexUsage, List<string> possible, ref int handlerCount)
+        List<string> indexUsage, List<string> constAccess, List<string> possible, ref int handlerCount)
     {
         var lines = File.ReadAllLines(file, enc);
 
@@ -262,6 +310,21 @@ public static class OrphanScanner
             if (im.Success) implements.Add(im.Groups[1].Value);
         }
 
+        // arrays that get elements at runtime (Load mnuX(i)), and constant accesses like mnuX(15)
+        var dynamicArrays = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var code = logical.Select(l => (l.Line, Text: StripStrings(StripComment(l.Text)))).ToList();
+        foreach (var (_, text) in code)
+            foreach (Match ld in Regex.Matches(text, @"\bLoad\s+(\w+)\s*\(", RegexOptions.IgnoreCase)) dynamicArrays.Add(ld.Groups[1].Value);
+        foreach (var (lineNo, text) in code)
+            foreach (Match a in Regex.Matches(text, @"(?<![.\w])(\w+)\s*\(\s*(-?\d+)\s*\)", RegexOptions.IgnoreCase))
+            {
+                var name = a.Groups[1].Value;
+                if (!controls.TryGetValue(name, out var idx) || idx.Count == 0 || idx.Contains(int.Parse(a.Groups[2].Value))) continue;
+                if (Regex.IsMatch(text[..a.Index], @"\bLoad\s+$", RegexOptions.IgnoreCase)) continue;
+                constAccess.Add($"{rel}:{lineNo}  {name}({a.Groups[2].Value})  -> formda yok (formdaki index'ler: {Ranges(idx)})"
+                    + (dynamicArrays.Contains(name) ? "  (Load ile çalışma zamanında eleman ekleniyor, yüklenmiş olabilir)" : ""));
+            }
+
         for (int li = 0; li < logical.Count; li++)
         {
             var (lineNo, text) = logical[li];
@@ -285,7 +348,7 @@ public static class OrphanScanner
                 bool isArray = indices.Count > 0;
                 if (isArray && hasIndex)
                 {
-                    var usage = AnalyzeIndexUsage(logical, li, indices);
+                    var usage = AnalyzeIndexUsage(logical, li, obj, controls, dynamicArrays);
                     if (usage != null) indexUsage.Add($"{where}  {proc}  (formdaki index'ler: {Ranges(indices)})" + usage);
                 }
                 else if (isArray && !hasIndex)

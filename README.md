@@ -27,12 +27,13 @@ VbOrphanHandlers.exe "D:\Uygulama\frm" "D:\Uygulama\lib" -o rapor.txt
 |---|---|
 | 1. Kontrolü olmayan olay prosedürleri | `Nesne_Olay` adlı prosedürün nesnesi formda yok (`Click`, `Change`, `KeyPress`, `GotFocus` ... bilinen olay adları) |
 | 2. Index uyuşmazlıkları | Kontrol dizisi olduğu halde prosedürde `Index As Integer` yok, ya da tekil kontrolün prosedürü `Index` alıyor (VB'de derleme hatası verir) |
-| 3. Kontrol dizilerinde index kullanımı | Prosedürde `Select Case Index` (`Case 1`, `Case 1, 2`, `Case 3 To 10`) ya da `If/ElseIf Index = n` ile kullanılan index'ler formdakilerle karşılaştırılır. **Kodda olup formda olmayan** index'ler (ölü dallar, satır numarasıyla) ve **formda olup kodda karşılığı olmayan** index'ler listelenir (`Case Else` varsa belirtilir). `Case Is > 5`, `If Index > n` gibi çözülemeyen ifadeler "Elle kontrol" olarak işaretlenir |
-| 4. Bilinmeyen olay adları | `Nesne_Ad` biçimindeki prosedürün nesnesi kontrol değil ve olay adı listede yok. Yardımcı bir fonksiyon olabilir, elle kontrol edin |
+| 3. Kontrol dizilerinde index kullanımı | Prosedürde `Select Case Index` (`Case 1`, `Case 1, 2`, `Case 3 To 10`) ya da `If/ElseIf Index = n` ile kullanılan index'ler formdakilerle karşılaştırılır. **Kodda olup formda olmayan** index'ler (ölü dallar, satır numarasıyla) ve **formda olup kodda karşılığı olmayan** index'ler listelenir (`Case Else` varsa belirtilir). `Case Is > 5`, `If Index > n` gibi çözülemeyen ifadeler "Elle kontrol" olarak işaretlenir. `Select Case Index + 1` ve `If Index - 1 = 2` gibi kaydırılmış ifadeler çözülür. `mnuX(Index + 1)` / `txtB(Index)` erişimlerinde formda olmayan elemana denk gelen index'ler **çalışma zamanı hatası riski** olarak raporlanır |
+| 4. Formda olmayan sabit index erişimleri | Form kodunda `mnuX(15)` gibi formda olmayan bir elemana sabit erişim. `Load mnuX(n)` ile çalışma zamanında eleman eklenen dizilerde not düşülür |
+| 5. Bilinmeyen olay adları | `Nesne_Ad` biçimindeki prosedürün nesnesi kontrol değil ve olay adı listede yok. Yardımcı bir fonksiyon olabilir, elle kontrol edin |
 
 Raporlanmayanlar: `Form_` / `MDIForm_` / `UserControl_` / `PropertyPage_` / `UserDocument_` olayları, `WithEvents` değişkenlerinin olayları, `Implements` arayüz metotları ve yorum satırları.
 
-- Taranan dosyalar: `.frm`, `.ctl`, `.pag`, `.dob`. Bir `.vbp` verildiğinde yalnızca projede listelenen formlar taranır.
+- Taranan dosyalar: `.frm`, `.ctl`, `.pag`, `.dob` (tek bir form dosyası da verilebilir). Bir `.vbp` verildiğinde yalnızca projede listelenen formlar taranır.
 - Alt çizgi içeren kontrol adları (`cmd_Kaydet_Click`) ve satıra bölünmüş (` _`) prosedür başlıkları desteklenir.
 - Dosyalar Windows-1254 ile **yalnızca okunur**. Projede hiçbir dosya değiştirilmez.
 
