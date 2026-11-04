@@ -27,7 +27,8 @@ VbOrphanHandlers.exe "D:\Uygulama\frm" "D:\Uygulama\lib" -o rapor.txt
 |---|---|
 | 1. Kontrolü olmayan olay prosedürleri | `Nesne_Olay` adlı prosedürün nesnesi formda yok (`Click`, `Change`, `KeyPress`, `GotFocus` ... bilinen olay adları) |
 | 2. Index uyuşmazlıkları | Kontrol dizisi olduğu halde prosedürde `Index As Integer` yok, ya da tekil kontrolün prosedürü `Index` alıyor (VB'de derleme hatası verir) |
-| 3. Bilinmeyen olay adları | `Nesne_Ad` biçimindeki prosedürün nesnesi kontrol değil ve olay adı listede yok. Yardımcı bir fonksiyon olabilir, elle kontrol edin |
+| 3. Kontrol dizilerinde index kullanımı | Prosedürde `Select Case Index` (`Case 1`, `Case 1, 2`, `Case 3 To 10`) ya da `If/ElseIf Index = n` ile kullanılan index'ler formdakilerle karşılaştırılır. **Kodda olup formda olmayan** index'ler (ölü dallar, satır numarasıyla) ve **formda olup kodda karşılığı olmayan** index'ler listelenir (`Case Else` varsa belirtilir). `Case Is > 5`, `If Index > n` gibi çözülemeyen ifadeler "Elle kontrol" olarak işaretlenir |
+| 4. Bilinmeyen olay adları | `Nesne_Ad` biçimindeki prosedürün nesnesi kontrol değil ve olay adı listede yok. Yardımcı bir fonksiyon olabilir, elle kontrol edin |
 
 Raporlanmayanlar: `Form_` / `MDIForm_` / `UserControl_` / `PropertyPage_` / `UserDocument_` olayları, `WithEvents` değişkenlerinin olayları, `Implements` arayüz metotları ve yorum satırları.
 
