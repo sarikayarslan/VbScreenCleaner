@@ -21,10 +21,8 @@
 ## Plan format (in chat, not a file, unless > 5 tasks)
 T1: <goal> | files: a.ts, b.ts | check: `npm test -- a.test.ts`
 ## Project
-- VB5/VB6 project cleaner (C#): `analyze <project dir>` reports unused screens/code, `clean <project dir> <target dir>` writes a cleaned copy + report. Never writes to the source project.
-- Stack: .NET 9, C#, WinForms GUI (`src/VbScreenCleaner`), Core, Cli, xUnit. Solution: VbScreenCleaner.sln
-- Build: `dotnet build VbScreenCleaner.sln -c Release`
-- Test: `dotnet test tests/VbScreenCleaner.Tests`
-- Run: `dotnet run --project src/VbScreenCleaner.Cli -- analyze samples/SampleVb5`
-- VB files are ANSI (Windows-1254), read/written via `VbProject.FileEncoding`; never re-encode `samples/`.
+- VbOrphanHandlers (C# WinForms, `src/VbOrphanHandlers`): reports VB5 event handlers (`x_Click` ...) whose control is missing, plus control-array Index mismatches. Read-only on the VB project.
+- Logic: `OrphanScanner.cs`; GUI: `MainForm.cs`; headless: `VbOrphanHandlers.exe <dir|vbp> [lib...] -o report.txt`.
+- Build: `dotnet build src/VbOrphanHandlers -c Release`
+- VB files are ANSI (Windows-1254), read only; never re-encode `samples/`.
 - Never edit: `samples/` (test input), `bin/`, `obj/`.
